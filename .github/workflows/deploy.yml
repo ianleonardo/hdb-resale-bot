@@ -19,8 +19,7 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
       - run: |
           gcloud builds submit ./backend \
-            --tag gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
-            --suppress-logs
+            --tag gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }}
           gcloud run deploy hdb-backend \
             --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
             --region $REGION --quiet
@@ -35,8 +34,7 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
       - run: |
           gcloud builds submit ./bot \
-            --tag gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} \
-            --suppress-logs
+            --tag gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }}
           gcloud run deploy hdb-bot \
             --image gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} \
             --region $REGION --quiet
