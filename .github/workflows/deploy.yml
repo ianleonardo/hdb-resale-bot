@@ -1,0 +1,41 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: asia-southeast1
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: |
+          gcloud builds submit ./backend \
+            --tag gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }}
+          gcloud run deploy hdb-backend \
+            --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
+            --region $REGION --quiet
+
+  deploy-bot:
+    runs-on: ubuntu-latest
+    needs: deploy-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: |
+          gcloud builds submit ./bot \
+            --tag gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }}
+          gcloud run deploy hdb-bot \
+            --image gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} \
+            --region $REGION --quiet

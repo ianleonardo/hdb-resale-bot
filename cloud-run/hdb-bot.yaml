@@ -1,0 +1,48 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: hdb-bot
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"   # Keep warm — session cache must persist
+        autoscaling.knative.dev/maxScale: "1"   # Single instance for MVP (see Section 7.1)
+        run.googleapis.com/execution-environment: gen2
+    spec:
+      serviceAccountName: hdb-bot@PROJECT_ID.iam.gserviceaccount.com
+      timeoutSeconds: 30
+      containers:
+        - image: gcr.io/PROJECT_ID/hdb-bot:latest
+          resources:
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          env:
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: telegram-bot-token
+                  key: latest
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gemini-api-key
+                  key: latest
+            - name: BACKEND_URL
+              value: "https://hdb-backend-xxxx-as.a.run.app"
+            - name: WEBHOOK_URL
+              value: "https://hdb-bot-xxxx-as.a.run.app/webhook"
+            - name: WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: webhook-secret
+                  key: latest
+            - name: SESSION_MAXSIZE
+              value: "500"
+            - name: SESSION_TTL
+              value: "3600"
+            - name: LOG_LEVEL
+              value: "INFO"
