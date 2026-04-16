@@ -2,8 +2,8 @@ import json
 import re
 import logging
 import google.generativeai as genai
-from bot.llm.gemini_client import get_gemini_model
-from bot.llm.system_prompt import build_system_prompt
+from llm.gemini_client import get_gemini_model
+from llm.system_prompt import build_system_prompt
 
 logger = logging.getLogger(__name__)
 

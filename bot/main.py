@@ -4,10 +4,10 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-from bot.llm.engine import process_message, format_result_singlish
-from bot.cache.session import SessionCache
-from bot.guards.topic_check import quick_topic_check
-from bot.services.backend_client import call_predict
+from llm.engine import process_message, format_result_singlish
+from cache.session import SessionCache
+from guards.topic_check import quick_topic_check
+from services.backend_client import call_predict
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)

@@ -1,4 +1,4 @@
-from bot.constants import VALID_TOWNS, VALID_FLAT_TYPES, VALID_FLAT_MODELS
+from constants import VALID_TOWNS, VALID_FLAT_TYPES, VALID_FLAT_MODELS
 
 
 def build_system_prompt(collected_params: dict) -> str:

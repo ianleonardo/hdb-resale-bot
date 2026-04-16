@@ -8,9 +8,9 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from google.cloud import storage
 
-from backend.app.model_loader import load_model, load_preprocessor
-from backend.app.preprocessing import build_inference_dataframe
-from backend.app.schemas import PredictRequest, PredictResponse
+from app.model_loader import load_model, load_preprocessor
+from app.preprocessing import build_inference_dataframe
+from app.schemas import PredictRequest, PredictResponse
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ async def health():
 
 @app.get("/meta")
 async def meta():
-    from backend.app.constants import VALID_TOWNS, VALID_FLAT_TYPES, VALID_FLAT_MODELS
+    from app.constants import VALID_TOWNS, VALID_FLAT_TYPES, VALID_FLAT_MODELS
     return {
         "towns":       VALID_TOWNS,
         "flat_types":  VALID_FLAT_TYPES,
