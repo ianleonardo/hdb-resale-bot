@@ -17,9 +17,14 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
       - uses: google-github-actions/setup-gcloud@v2
-      - run: |
-          gcloud builds submit ./backend \
-            --tag gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }}
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker --quiet
+      - name: Build and push backend image
+        run: |
+          docker build -t gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} ./backend
+          docker push gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }}
+      - name: Deploy backend to Cloud Run
+        run: |
           gcloud run deploy hdb-backend \
             --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
             --region $REGION --quiet
@@ -32,9 +37,14 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
       - uses: google-github-actions/setup-gcloud@v2
-      - run: |
-          gcloud builds submit ./bot \
-            --tag gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }}
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker --quiet
+      - name: Build and push bot image
+        run: |
+          docker build -t gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} ./bot
+          docker push gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }}
+      - name: Deploy bot to Cloud Run
+        run: |
           gcloud run deploy hdb-bot \
             --image gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} \
             --region $REGION --quiet
