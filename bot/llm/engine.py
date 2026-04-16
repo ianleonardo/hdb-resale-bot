@@ -2,10 +2,32 @@ import json
 import re
 import logging
 import google.generativeai as genai
-from llm.gemini_client import get_gemini_model
 from llm.system_prompt import build_system_prompt
 
 logger = logging.getLogger(__name__)
+
+_GENERATION_CONFIG = genai.GenerationConfig(
+    temperature=0.4,
+    max_output_tokens=1024,
+    response_mime_type="application/json",
+)
+
+_SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+]
+
+
+def _get_model(system_instruction: str) -> genai.GenerativeModel:
+    """Create a Gemini model with the given system instruction."""
+    return genai.GenerativeModel(
+        model_name="gemini-2.0-flash",
+        generation_config=_GENERATION_CONFIG,
+        safety_settings=_SAFETY_SETTINGS,
+        system_instruction=system_instruction,
+    )
 
 
 async def process_message(
@@ -17,26 +39,17 @@ async def process_message(
     Send user message to Gemini with full context.
     Returns parsed dict: { reply, extracted_params, ready_to_predict, off_topic }
     """
-    model = get_gemini_model()
     system_instruction = build_system_prompt(collected_params)
+    model = _get_model(system_instruction)
 
-    # Build Gemini contents: alternate user/model turns
     contents = []
-    for turn in conversation_history[-20:]:  # last 20 turns
+    for turn in conversation_history[-20:]:
         role = "user" if turn["role"] == "user" else "model"
         contents.append({"role": role, "parts": [{"text": turn["content"]}]})
     contents.append({"role": "user", "parts": [{"text": user_message}]})
 
     try:
-        response = model.generate_content(
-            contents=contents,
-            generation_config=genai.GenerationConfig(
-                temperature=0.4,
-                max_output_tokens=1024,
-                response_mime_type="application/json",
-                system_instruction=system_instruction,
-            ),
-        )
+        response = model.generate_content(contents=contents)
         raw = response.text.strip()
         return _parse_response(raw)
 
@@ -72,7 +85,10 @@ def _parse_response(raw: str) -> dict:
 
 async def format_result_singlish(prediction: dict, params: dict) -> str:
     """Use Gemini to craft a warm Singlish result message."""
-    model = get_gemini_model()
+    model = genai.GenerativeModel(
+        model_name="gemini-2.0-flash",
+        generation_config=genai.GenerationConfig(temperature=0.4, max_output_tokens=1024),
+    )
     prompt = f"""
 You are Uncle HDB. A user just got their HDB resale price estimate.
 Write a warm, natural Singlish reply (5–8 lines) that:
