@@ -27,7 +27,10 @@ jobs:
         run: |
           gcloud run deploy hdb-backend \
             --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
-            --region $REGION --quiet
+            --region $REGION \
+            --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com \
+            --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=3.0.0,LOG_LEVEL=INFO \
+            --quiet
 
   deploy-bot:
     runs-on: ubuntu-latest
@@ -47,4 +50,8 @@ jobs:
         run: |
           gcloud run deploy hdb-bot \
             --image gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} \
-            --region $REGION --quiet
+            --region $REGION \
+            --service-account hdb-bot@$PROJECT_ID.iam.gserviceaccount.com \
+            --set-secrets TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest,WEBHOOK_SECRET=webhook-secret:latest \
+            --set-env-vars BACKEND_URL=${{ secrets.BACKEND_URL }},WEBHOOK_URL=${{ secrets.WEBHOOK_URL }},LOG_LEVEL=INFO \
+            --quiet
