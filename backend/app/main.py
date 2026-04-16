@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from google.cloud import storage
 
 from backend.app.model_loader import load_model, load_preprocessor
@@ -22,10 +22,13 @@ MODEL_VERSION = os.environ.get("MODEL_VERSION", "3.0.0")
 
 @app.on_event("startup")
 async def startup():
-    """Warm up model cache on container startup."""
-    load_model()
-    load_preprocessor()
-    logger.info("Model and preprocessor loaded from GCS ✅")
+    """Attempt to warm up model cache on startup. Non-fatal if artifacts not yet in GCS."""
+    try:
+        load_model()
+        load_preprocessor()
+        logger.info("Model and preprocessor loaded from GCS ✅")
+    except Exception as exc:
+        logger.warning(f"Model not loaded at startup (will retry on first request): {exc}")
 
 
 @app.get("/health")
@@ -45,8 +48,12 @@ async def meta():
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(req: PredictRequest):
-    model        = load_model()
-    preprocessor = load_preprocessor()
+    try:
+        model        = load_model()
+        preprocessor = load_preprocessor()
+    except Exception as exc:
+        logger.error(f"Model unavailable: {exc}")
+        raise HTTPException(status_code=503, detail="Model not yet available. Run training pipeline first.")
 
     df        = build_inference_dataframe(req)
     features  = preprocessor.transform(df)
