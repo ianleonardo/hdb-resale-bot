@@ -1,6 +1,9 @@
-import os
+import asyncio
 import logging
+import os
+from contextlib import asynccontextmanager
 
+from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
@@ -17,34 +20,32 @@ session_cache = SessionCache(
     ttl=int(os.environ.get("SESSION_TTL", 3600)),
 )
 
+ptb_app: Application = None
+
+
+# ── Telegram handlers ────────────────────────────────────────────────────────
 
 async def handle_message(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     user_msg = update.message.text.strip()
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
-    # Layer 1 fast topic check — obvious off-topic caught cheaply
-    quick_topic_check(user_msg)  # result passed to LLM layer via system prompt
+    quick_topic_check(user_msg)
 
     state = session_cache.get(chat_id)
-
     llm_result = await process_message(
         user_message=user_msg,
         conversation_history=state["history"],
         collected_params=state["collected_params"],
     )
 
-    # Update session
     session_cache.append_history(chat_id, "user", user_msg)
     session_cache.append_history(chat_id, "assistant", llm_result["reply"])
     if llm_result.get("extracted_params"):
         session_cache.merge_params(chat_id, llm_result["extracted_params"])
 
-    # Send Gemini reply
     await update.message.reply_text(llm_result["reply"], parse_mode="Markdown")
 
-    # Trigger ML prediction when all params collected
     if llm_result.get("ready_to_predict") and session_cache.is_complete(chat_id):
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
         updated_state = session_cache.get(chat_id)
@@ -54,7 +55,6 @@ async def handle_message(update: Update, context) -> None:
                 prediction, updated_state["collected_params"]
             )
             await update.message.reply_text(singlish_reply, parse_mode="Markdown")
-
         except Exception as exc:
             logger.error(f"Prediction call failed: {exc}")
             await update.message.reply_text(
@@ -98,22 +98,48 @@ async def cmd_help(update: Update, context) -> None:
     )
 
 
-def main():
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
-    app.add_handler(CommandHandler("start",    cmd_start))
-    app.add_handler(CommandHandler("estimate", cmd_start))
-    app.add_handler(CommandHandler("cancel",   cmd_cancel))
-    app.add_handler(CommandHandler("help",     cmd_help))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+# ── Bot initialisation (runs in background after server starts) ──────────────
 
-    port = int(os.environ.get("PORT", 8080))
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        webhook_url=os.environ["WEBHOOK_URL"],
-        secret_token=os.environ.get("WEBHOOK_SECRET", ""),
-    )
+async def _init_bot():
+    global ptb_app
+    try:
+        app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+        app.add_handler(CommandHandler("start",    cmd_start))
+        app.add_handler(CommandHandler("estimate", cmd_start))
+        app.add_handler(CommandHandler("cancel",   cmd_cancel))
+        app.add_handler(CommandHandler("help",     cmd_help))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        await app.initialize()
+        ptb_app = app
+        logger.info("Telegram bot initialised ✅")
+    except Exception as exc:
+        logger.error(f"Bot initialisation failed: {exc}")
 
 
-if __name__ == "__main__":
-    main()
+# ── FastAPI app ──────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start bot init in background so port 8080 binds immediately
+    asyncio.create_task(_init_bot())
+    yield
+    if ptb_app:
+        await ptb_app.shutdown()
+
+
+web_app = FastAPI(lifespan=lifespan)
+
+
+@web_app.get("/health")
+async def health():
+    return {"status": "ok", "bot_ready": ptb_app is not None}
+
+
+@web_app.post("/webhook")
+async def webhook(request: Request):
+    if ptb_app is None:
+        return Response(status_code=503)
+    data = await request.json()
+    update = Update.de_json(data, ptb_app.bot)
+    await ptb_app.process_update(update)
+    return Response(status_code=200)
