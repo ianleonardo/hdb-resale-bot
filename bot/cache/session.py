@@ -7,6 +7,8 @@ DEFAULT_PARAMS = {
     "remaining_lease_years": None, "street_name": None, "block": None,
 }
 
+REQUIRED_PARAMS = {"town", "flat_type", "flat_model", "storey_range", "floor_area_sqm"}
+
 
 class SessionCache:
     """
@@ -51,6 +53,8 @@ class SessionCache:
                     state["collected_params"][key] = val
 
     def is_complete(self, chat_id: int) -> bool:
+        """True when all 5 required params are collected (optional params may still be None)."""
         with self._lock:
             state = self._cache.get(chat_id, self._default_state())
-            return all(v is not None for v in state["collected_params"].values())
+            params = state["collected_params"]
+            return all(params.get(k) is not None for k in REQUIRED_PARAMS)

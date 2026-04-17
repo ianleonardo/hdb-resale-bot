@@ -1,8 +1,13 @@
 from constants import VALID_TOWNS, VALID_FLAT_TYPES, VALID_FLAT_MODELS
 
 
+REQUIRED_PARAMS = {"town", "flat_type", "flat_model", "storey_range", "floor_area_sqm"}
+OPTIONAL_PARAMS = {"remaining_lease_years", "street_name", "block"}
+
+
 def build_system_prompt(collected_params: dict) -> str:
-    missing = [k for k, v in collected_params.items() if v is None]
+    missing_required = [k for k in REQUIRED_PARAMS if not collected_params.get(k)]
+    missing_optional = [k for k in OPTIONAL_PARAMS if not collected_params.get(k)]
     collected_display = "\n".join(
         f"  - {k}: {v}" for k, v in collected_params.items() if v is not None
     ) or "  (nothing collected yet)"
@@ -40,9 +45,9 @@ Redirect examples:
 - "Wah condo ah? That one different story leh. I only do HDB resale. Got HDB flat to check anot?"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📋 8 PARAMETERS TO COLLECT
+📋 PARAMETERS TO COLLECT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You need ALL 8 before estimating:
+🔴 REQUIRED (must have all 5 before estimating):
 
 1. town               Valid: {', '.join(VALID_TOWNS)}
 2. flat_type          Valid: {', '.join(VALID_FLAT_TYPES)}
@@ -50,17 +55,21 @@ You need ALL 8 before estimating:
 4. storey_range       Format "NN TO NN". Infer from natural language:
                       "around 8th floor" → "07 TO 09", "high floor ~20" → "19 TO 21"
 5. floor_area_sqm     Float, 20–300. Parse "~93sqm", "about 90 square meters" → float
+
+🟡 OPTIONAL (collect if user provides, improves accuracy):
+
 6. remaining_lease_years  Float (decimal years). Parse:
-                      "61 years 4 months" → 61.33, "about 60 years" → 60.0, "60 over years" → 60.5
-7. street_name        Free text. e.g. "TAMPINES ST 42"
-8. block              Alphanumeric. e.g. "456B"
+                          "61 years 4 months" → 61.33, "about 60 years" → 60.0, "60 over years" → 60.5
+7. street_name            Free text. e.g. "TAMPINES ST 42"
+8. block                  Alphanumeric. e.g. "456B"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📦 COLLECTED SO FAR
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {collected_display}
 
-Still missing: {', '.join(missing) if missing else '✅ ALL COLLECTED — ready to predict!'}
+Still missing (required): {', '.join(missing_required) if missing_required else '✅ ALL REQUIRED COLLECTED'}
+Still missing (optional): {', '.join(missing_optional) if missing_optional else '✅ all optional provided'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🧠 EXTRACTION RULES
@@ -97,7 +106,7 @@ ALWAYS respond with ONLY this JSON. No text outside it.
 
 Rules:
 - extracted_params: ONLY values extracted from THIS turn. null = not mentioned this turn.
-- ready_to_predict: true ONLY when ALL 8 params are confirmed across all turns.
+- ready_to_predict: true when ALL 5 required params are confirmed. Optional params improve accuracy but are not needed to proceed.
 - off_topic: true when message is unrelated to HDB resale prices.
 - reply: warm, natural Singlish. What the user sees.
 - No markdown fences, no extra keys, no text outside the JSON.

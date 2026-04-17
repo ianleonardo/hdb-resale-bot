@@ -1388,11 +1388,15 @@ def _bucket():
 ### 14.4 IAM Permissions Required
 
 
-| Service Account   | Role                         | Purpose                    |
-| ----------------- | ---------------------------- | -------------------------- |
-| `hdb-bot@...`     | `roles/storage.objectViewer` | Not needed (no GCS access) |
-| `hdb-backend@...` | `roles/storage.objectAdmin`  | Read models, write logs    |
-| Training SA       | `roles/storage.objectAdmin`  | Read data, write models    |
+| Service Account      | Role                                | Purpose                              |
+| -------------------- | ----------------------------------- | ------------------------------------ |
+| `hdb-backend@...`    | `roles/storage.objectAdmin`         | Read models from GCS, write logs     |
+| `hdb-backend@...`    | `roles/secretmanager.secretAccessor`| (optional) future secret use         |
+| `hdb-bot@...`        | `roles/secretmanager.secretAccessor`| Read Telegram token, Gemini key      |
+| `github-actions@...` | `roles/run.admin`                   | Deploy Cloud Run services            |
+| `github-actions@...` | `roles/artifactregistry.writer`     | Push Docker images to GCR            |
+| `github-actions@...` | `roles/iam.serviceAccountUser`      | Act as hdb-bot and hdb-backend SAs   |
+| `github-actions@...` | `roles/viewer`                      | Stream Cloud Build / Run logs        |
 
 
 ---
@@ -1516,66 +1520,39 @@ CMD ["gunicorn", "app.main:app", \
 ### 15.3 Deployment Commands (gcloud CLI)
 
 ```bash
+export PROJECT_ID="your-gcp-project-id"
+export REGION="asia-southeast1"
+
+# ── Authenticate Docker to GCR ───────────────────────────────────
+gcloud auth configure-docker --quiet
+
 # ── Build & push images ──────────────────────────────────────────
-PROJECT_ID="your-gcp-project-id"
-REGION="asia-southeast1"      # Singapore region
+docker build -t gcr.io/$PROJECT_ID/hdb-backend:latest ./backend
+docker push gcr.io/$PROJECT_ID/hdb-backend:latest
 
-gcloud builds submit ./bot     --tag gcr.io/$PROJECT_ID/hdb-bot:latest
-gcloud builds submit ./backend --tag gcr.io/$PROJECT_ID/hdb-backend:latest
+docker build -t gcr.io/$PROJECT_ID/hdb-bot:latest ./bot
+docker push gcr.io/$PROJECT_ID/hdb-bot:latest
 
-# ── Store secrets in Secret Manager ─────────────────────────────
-echo -n "$TELEGRAM_BOT_TOKEN" | gcloud secrets create telegram-bot-token \
-  --data-file=- --replication-policy=automatic
-echo -n "$GEMINI_API_KEY"     | gcloud secrets create gemini-api-key \
-  --data-file=- --replication-policy=automatic
-echo -n "$WEBHOOK_SECRET"     | gcloud secrets create webhook-secret \
-  --data-file=- --replication-policy=automatic
-
-# ── Deploy hdb-backend first (needed by bot) ────────────────────
-gcloud run deploy hdb-backend \
-  --image gcr.io/$PROJECT_ID/hdb-backend:latest \
-  --region $REGION \
-  --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com \
-  --ingress internal \
-  --min-instances 1 \
-  --max-instances 3 \
-  --memory 1Gi \
-  --cpu 2 \
-  --timeout 30 \
-  --set-env-vars GCS_BUCKET=hdb-resale-artifacts \
-  --no-allow-unauthenticated
+# ── Deploy hdb-backend ───────────────────────────────────────────
+gcloud run deploy hdb-backend --image gcr.io/$PROJECT_ID/hdb-backend:latest --region $REGION --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com --ingress internal --min-instances 1 --max-instances 3 --memory 1Gi --cpu 2 --timeout 30 --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=3.0.0,LOG_LEVEL=INFO --no-allow-unauthenticated --quiet
 
 # Get backend URL
-BACKEND_URL=$(gcloud run services describe hdb-backend \
-  --region $REGION --format='value(status.url)')
+BACKEND_URL=$(gcloud run services describe hdb-backend --region $REGION --format='value(status.url)')
 
 # ── Deploy hdb-bot ───────────────────────────────────────────────
-gcloud run deploy hdb-bot \
-  --image gcr.io/$PROJECT_ID/hdb-bot:latest \
-  --region $REGION \
-  --service-account hdb-bot@$PROJECT_ID.iam.gserviceaccount.com \
-  --ingress all \
-  --min-instances 1 \
-  --max-instances 1 \
-  --memory 512Mi \
-  --cpu 1 \
-  --timeout 30 \
-  --set-secrets TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,\
-GEMINI_API_KEY=gemini-api-key:latest,\
-WEBHOOK_SECRET=webhook-secret:latest \
-  --set-env-vars "BACKEND_URL=$BACKEND_URL" \
-  --allow-unauthenticated
+gcloud run deploy hdb-bot --image gcr.io/$PROJECT_ID/hdb-bot:latest --region $REGION --service-account hdb-bot@$PROJECT_ID.iam.gserviceaccount.com --ingress all --min-instances 1 --max-instances 1 --memory 512Mi --cpu 1 --timeout 30 --set-secrets TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest,WEBHOOK_SECRET=webhook-secret:latest --set-env-vars "BACKEND_URL=$BACKEND_URL,WEBHOOK_URL=https://hdb-bot-xxxx-as.a.run.app/webhook,LOG_LEVEL=INFO" --allow-unauthenticated --quiet
 
 # Get bot URL and register Telegram webhook
-BOT_URL=$(gcloud run services describe hdb-bot \
-  --region $REGION --format='value(status.url)')
+BOT_URL=$(gcloud run services describe hdb-bot --region $REGION --format='value(status.url)')
 
-curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-  -d "url=${BOT_URL}/webhook" \
-  -d "secret_token=${WEBHOOK_SECRET}"
+curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" -d "url=${BOT_URL}/webhook" -d "secret_token=${WEBHOOK_SECRET}"
 ```
 
+> ⚠️ Run gcloud CLI commands as single lines (no backslash continuation) to avoid shell parsing errors on zsh.
+
 ### 15.4 CI/CD Pipeline (GitHub Actions)
+
+Both jobs run in parallel on every push to `main`. Docker images are built on the GitHub Actions runner directly — this avoids Cloud Build log-streaming permission issues.
 
 ```yaml
 # .github/workflows/deploy.yml
@@ -1598,31 +1575,155 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
       - uses: google-github-actions/setup-gcloud@v2
-      - run: |
-          gcloud builds submit ./backend \
-            --tag gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }}
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker --quiet
+      - name: Build and push backend image
+        run: |
+          docker build -t gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} ./backend
+          docker push gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }}
+      - name: Deploy backend to Cloud Run
+        run: |
           gcloud run deploy hdb-backend \
             --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
-            --region $REGION --quiet
+            --region $REGION \
+            --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com \
+            --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=3.0.0,LOG_LEVEL=INFO \
+            --quiet
 
   deploy-bot:
     runs-on: ubuntu-latest
-    needs: deploy-backend
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
       - uses: google-github-actions/setup-gcloud@v2
-      - run: |
-          gcloud builds submit ./bot \
-            --tag gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }}
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker --quiet
+      - name: Build and push bot image
+        run: |
+          docker build -t gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} ./bot
+          docker push gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }}
+      - name: Deploy bot to Cloud Run
+        run: |
           gcloud run deploy hdb-bot \
             --image gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} \
-            --region $REGION --quiet
+            --region $REGION \
+            --service-account hdb-bot@$PROJECT_ID.iam.gserviceaccount.com \
+            --set-secrets TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest,WEBHOOK_SECRET=webhook-secret:latest \
+            --set-env-vars BACKEND_URL=${{ secrets.BACKEND_URL }},WEBHOOK_URL=${{ secrets.WEBHOOK_URL }},LOG_LEVEL=INFO \
+            --quiet
 ```
 
-### 15.5 Estimated Monthly Cost (GCP)
+**Required GitHub repository secrets** (Settings → Secrets and variables → Actions):
+
+| Secret name | Value |
+| ----------- | ----- |
+| `GCP_PROJECT_ID` | GCP project ID string |
+| `GCP_SA_KEY` | Full JSON content of the `github-actions` service account key |
+| `BACKEND_URL` | Cloud Run URL of `hdb-backend` |
+| `WEBHOOK_URL` | Cloud Run URL of `hdb-bot` + `/webhook` |
+
+### 15.5 Full GCP Setup — One-Time Steps
+
+Run all commands in order before the first deployment. All `gcloud` commands must be run as single lines on zsh to avoid shell parsing errors.
+
+#### Step 1 — Set project ID
+
+```bash
+export PROJECT_ID="your-gcp-project-id"
+export REGION="asia-southeast1"
+```
+
+#### Step 2 — Create service accounts
+
+```bash
+gcloud iam service-accounts create hdb-bot --display-name="HDB Bot service account"
+
+gcloud iam service-accounts create hdb-backend --display-name="HDB Backend service account"
+
+gcloud iam service-accounts create github-actions --display-name="GitHub Actions deployer"
+```
+
+#### Step 3 — Grant IAM roles to hdb-backend
+
+```bash
+gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:hdb-backend@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/storage.objectAdmin"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:hdb-backend@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+```
+
+#### Step 4 — Grant IAM roles to github-actions
+
+```bash
+gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:github-actions@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/run.admin"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:github-actions@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/storage.admin"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:github-actions@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/artifactregistry.writer"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID --member="serviceAccount:github-actions@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/viewer"
+```
+
+#### Step 5 — Allow github-actions to act as the service accounts
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding hdb-bot@$PROJECT_ID.iam.gserviceaccount.com --member="serviceAccount:github-actions@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/iam.serviceAccountUser"
+
+gcloud iam service-accounts add-iam-policy-binding hdb-backend@$PROJECT_ID.iam.gserviceaccount.com --member="serviceAccount:github-actions@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/iam.serviceAccountUser"
+```
+
+#### Step 6 — Create secrets in Secret Manager
+
+Generate a random webhook secret:
+```bash
+python3 -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Create the secrets (replace values with your actual tokens):
+```bash
+echo -n "your-telegram-bot-token" | gcloud secrets create telegram-bot-token --data-file=- --replication-policy=automatic
+
+echo -n "your-gemini-api-key" | gcloud secrets create gemini-api-key --data-file=- --replication-policy=automatic
+
+echo -n "your-webhook-secret" | gcloud secrets create webhook-secret --data-file=- --replication-policy=automatic
+```
+
+#### Step 7 — Grant hdb-bot access to secrets
+
+```bash
+gcloud secrets add-iam-policy-binding telegram-bot-token --member="serviceAccount:hdb-bot@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding gemini-api-key --member="serviceAccount:hdb-bot@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding webhook-secret --member="serviceAccount:hdb-bot@$PROJECT_ID.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+```
+
+#### Step 8 — Create github-actions key and add to GitHub
+
+```bash
+gcloud iam service-accounts keys create gha-key.json --iam-account=github-actions@$PROJECT_ID.iam.gserviceaccount.com
+```
+
+Go to your repo → **Settings → Secrets and variables → Actions → New repository secret** and add:
+
+| Secret name | Value |
+| ----------- | ----- |
+| `GCP_PROJECT_ID` | Your GCP project ID string |
+| `GCP_SA_KEY` | Full contents of `gha-key.json` |
+| `BACKEND_URL` | Cloud Run URL of `hdb-backend` (get after first deploy) |
+| `WEBHOOK_URL` | Cloud Run URL of `hdb-bot` + `/webhook` (get after first deploy) |
+
+```bash
+# Delete the local key file immediately after
+rm gha-key.json
+```
+
+> ⚠️ Never commit `gha-key.json`. Verify it is listed in `.gitignore`.
+
+---
+
+### 15.6 Estimated Monthly Cost (GCP)
 
 
 | Resource                                     | Usage Estimate                 | Monthly Cost (SGD) |

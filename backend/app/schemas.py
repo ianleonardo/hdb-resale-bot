@@ -1,16 +1,20 @@
 import re
+from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
 
 class PredictRequest(BaseModel):
-    town:                   str
-    flat_type:              str
-    flat_model:             str
-    storey_range:           str           # "07 TO 09"
-    floor_area_sqm:         float = Field(ge=20.0,  le=300.0)
-    remaining_lease_years:  float = Field(ge=0.0,   le=99.0)
-    street_name:            str
-    block:                  str
+    # Required
+    town:              str
+    flat_type:         str
+    flat_model:        str
+    storey_range:      str           # "07 TO 09"
+    floor_area_sqm:    float = Field(ge=20.0, le=300.0)
+
+    # Optional — model uses defaults when absent
+    remaining_lease_years: Optional[float] = Field(default=None, ge=0.0, le=99.0)
+    street_name:           Optional[str]   = None
+    block:                 Optional[str]   = None
 
     @field_validator("storey_range")
     @classmethod
