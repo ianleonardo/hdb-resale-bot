@@ -3,7 +3,6 @@ import logging
 
 import joblib
 import lightgbm as lgb
-import numpy as np
 import optuna
 import pandas as pd
 from google.cloud import storage
@@ -16,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 GCS_BUCKET = "hdb-resale-artifacts"
 DATA_BLOB  = "training/Resaleflatpricesbase.csv"
-TARGET     = "log_resale_price"
+TARGET     = "resale_price"
 
 # Populated by prepare_data()
 X_train = X_val = y_train = y_val = None
@@ -28,7 +27,7 @@ def prepare_data():
     csv_bytes = gcs.bucket(GCS_BUCKET).blob(DATA_BLOB).download_as_bytes()
     df = engineer_features(pd.read_csv(io.BytesIO(csv_bytes)))
 
-    train = df[df["transaction_year"] <= 2024]
+    train = df[(df["transaction_year"] >= 2017) & (df["transaction_year"] <= 2024)]
     val   = df[(df["transaction_year"] == 2025) & (df["transaction_month"] <= 9)]
 
     preprocessor = build_preprocessor()
@@ -49,13 +48,16 @@ def objective(trial: optuna.Trial) -> float:
         "reg_lambda":        trial.suggest_float("reg_lambda", 1e-3, 10, log=True),
     }
     # Use 2000 estimators with early stopping — matches the final training budget
-    model = lgb.LGBMRegressor(n_estimators=2000, **params, random_state=42, n_jobs=-1)
+    model = lgb.LGBMRegressor(
+        n_estimators=5000, objective="regression_l1", metric="mae",
+        **params, random_state=42, n_jobs=-1,
+    )
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
-        callbacks=[lgb.early_stopping(30), lgb.log_evaluation(0)],
+        callbacks=[lgb.early_stopping(100), lgb.log_evaluation(0)],
     )
-    return mean_absolute_error(np.expm1(y_val), np.expm1(model.predict(X_val)))
+    return mean_absolute_error(y_val, model.predict(X_val))
 
 
 def main(n_trials: int = 100):

@@ -4,7 +4,8 @@ import pandas as pd
 
 # Defaults used when optional fields are not provided
 DEFAULT_REMAINING_LEASE_YEARS = 70.0   # ~median for Singapore HDB stock
-DEFAULT_BLOCK_STREET = "UNKNOWN UNKNOWN"
+DEFAULT_STREET_NAME = "UNKNOWN"
+DEFAULT_BLOCK = "UNKNOWN"
 
 
 def build_inference_dataframe(req) -> pd.DataFrame:
@@ -14,12 +15,9 @@ def build_inference_dataframe(req) -> pd.DataFrame:
     now = datetime.now(timezone.utc)
 
     remaining = req.remaining_lease_years if req.remaining_lease_years is not None else DEFAULT_REMAINING_LEASE_YEARS
-
-    # Match training: block_street is the single high-cardinality location feature
-    if req.block and req.street_name:
-        block_street = f"{req.block.strip()} {req.street_name.strip()}"
-    else:
-        block_street = DEFAULT_BLOCK_STREET
+    street = req.street_name.strip() if req.street_name else DEFAULT_STREET_NAME
+    block = req.block.strip() if req.block else DEFAULT_BLOCK
+    block_street = f"{block} {street}"
 
     month = now.month
     return pd.DataFrame([{
@@ -29,6 +27,8 @@ def build_inference_dataframe(req) -> pd.DataFrame:
         "storey_midpoint":        storey_mid,
         "floor_area_sqm":         req.floor_area_sqm,
         "remaining_lease_years":  remaining,
+        "street_name":            street,
+        "block":                  block,
         "block_street":           block_street,
         "transaction_year":       now.year,
         "month_sin":              np.sin(2 * np.pi * month / 12),

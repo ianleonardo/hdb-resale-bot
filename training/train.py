@@ -1,7 +1,7 @@
 import io
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -22,7 +22,7 @@ LOCAL_DATA      = Path("../data")
 LOCAL_ARTIFACTS = Path("artifacts/")
 LOCAL_ARTIFACTS.mkdir(exist_ok=True)
 
-TARGET = "log_resale_price"
+TARGET = "resale_price"
 
 
 def load_data() -> pd.DataFrame:
@@ -41,7 +41,7 @@ def split_data(df: pd.DataFrame):
       Val   : 2025-01 – 2025-09  (~10%)
       Test  : 2025-10 – 2026-03  (~5%)
     """
-    train = df[df["transaction_year"] <= 2024]
+    train = df[(df["transaction_year"] >= 2017) & (df["transaction_year"] <= 2024)]
     val   = df[(df["transaction_year"] == 2025) & (df["transaction_month"] <= 9)]
     test  = df[
         ((df["transaction_year"] == 2025) & (df["transaction_month"] >= 10)) |
@@ -73,13 +73,12 @@ def save_splits(train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame):
         logger.info(f"Uploaded gs://{GCS_BUCKET}/{blob_path}")
 
 
-def evaluate(name: str, model, X, y_log: pd.Series) -> dict:
-    pred = np.expm1(model.predict(X))
-    true = np.expm1(y_log)
-    mae  = mean_absolute_error(true, pred)
-    rmse = float(np.sqrt(mean_squared_error(true, pred)))
-    mape = float(np.mean(np.abs((true - pred) / true)) * 100)
-    r2   = r2_score(true, pred)
+def evaluate(name: str, model, X, y: pd.Series) -> dict:
+    pred = model.predict(X)
+    mae  = mean_absolute_error(y, pred)
+    rmse = float(np.sqrt(mean_squared_error(y, pred)))
+    mape = float(np.mean(np.abs((y - pred) / y)) * 100)
+    r2   = r2_score(y, pred)
     logger.info(f"{name}: MAE={mae:,.0f} | RMSE={rmse:,.0f} | MAPE={mape:.2f}% | R²={r2:.4f}")
     return {"MAE": mae, "RMSE": rmse, "MAPE": mape, "R2": r2}
 
@@ -103,18 +102,21 @@ def main():
     y_train, y_val, y_test = train_df[TARGET], val_df[TARGET], test_df[TARGET]
 
     model = lgb.LGBMRegressor(
-        n_estimators=2000, learning_rate=0.03, num_leaves=127,
-        min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
-        reg_alpha=0.1, reg_lambda=1.0, random_state=42, n_jobs=-1,
+        n_estimators=5000, objective="regression_l1", metric="mae",
+        # HPO best params (trial 85/100, val MAE=46,103 — re-tune after objective change)
+        num_leaves=181, learning_rate=0.050, min_child_samples=82,
+        subsample=0.738, colsample_bytree=0.537,
+        reg_alpha=0.031, reg_lambda=0.021,
+        random_state=42, n_jobs=-1,
     )
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
-        callbacks=[lgb.early_stopping(100), lgb.log_evaluation(200)],
+        callbacks=[lgb.early_stopping(200), lgb.log_evaluation(500)],
     )
 
     metrics = {
-        "trained_at":  datetime.utcnow().isoformat(),
+        "trained_at":  datetime.now(timezone.utc).isoformat(),
         "validation":  evaluate("Validation", model, X_val,  y_val),
         "test":        evaluate("Test",        model, X_test, y_test),
     }

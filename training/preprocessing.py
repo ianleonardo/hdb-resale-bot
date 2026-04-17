@@ -18,18 +18,27 @@ NUMERIC_FEATURES  = [
 ]
 ORDINAL_FEATURES  = ["flat_type"]
 NOMINAL_FEATURES  = ["town", "flat_model"]
-HIGH_CARD         = ["block_street"]
+# All three location features kept: street_name and block capture coarser signals,
+# block_street captures the exact building — higher smoothing prevents rare combos from overfitting
+HIGH_CARD_STREET = ["street_name"]
+HIGH_CARD_BLOCK  = ["block"]
+HIGH_CARD_COMBO  = ["block_street"]
 
-ALL_FEATURES = NUMERIC_FEATURES + ORDINAL_FEATURES + NOMINAL_FEATURES + HIGH_CARD
+ALL_FEATURES = (
+    NUMERIC_FEATURES + ORDINAL_FEATURES + NOMINAL_FEATURES
+    + HIGH_CARD_STREET + HIGH_CARD_BLOCK + HIGH_CARD_COMBO
+)
 
 
 def build_preprocessor() -> ColumnTransformer:
     # No StandardScaler — LightGBM is scale-invariant
     return ColumnTransformer(transformers=[
-        ("num", "passthrough",                                     NUMERIC_FEATURES),
-        ("ord", OrdinalEncoder(categories=[ORDINAL_FLAT_TYPE]),    ORDINAL_FEATURES),
-        ("nom", OneHotEncoder(handle_unknown="ignore", sparse_output=False), NOMINAL_FEATURES),
-        ("hc",  TargetEncoder(smoothing=10),                       HIGH_CARD),
+        ("num",       "passthrough",                                          NUMERIC_FEATURES),
+        ("ord",       OrdinalEncoder(categories=[ORDINAL_FLAT_TYPE]),         ORDINAL_FEATURES),
+        ("nom",       OneHotEncoder(handle_unknown="ignore", sparse_output=False), NOMINAL_FEATURES),
+        ("hc_street", TargetEncoder(smoothing=10),                            HIGH_CARD_STREET),
+        ("hc_block",  TargetEncoder(smoothing=10),                            HIGH_CARD_BLOCK),
+        ("hc_combo",  TargetEncoder(smoothing=50),                            HIGH_CARD_COMBO),
     ])
 
 
@@ -56,5 +65,4 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     # Combine block + street for a single high-cardinality location feature
     df["block_street"] = df["block"].astype(str).str.strip() + " " + df["street_name"].astype(str).str.strip()
 
-    df["log_resale_price"] = np.log1p(df["resale_price"])
     return df
