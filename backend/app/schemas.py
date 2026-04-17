@@ -19,9 +19,18 @@ class PredictRequest(BaseModel):
     @field_validator("storey_range")
     @classmethod
     def validate_storey(cls, v: str) -> str:
-        if not re.match(r"^\d{2} TO \d{2}$", v.strip()):
-            raise ValueError("storey_range must match 'NN TO NN'")
-        return v.strip().upper()
+        from app.constants import VALID_STOREY_RANGES
+        v = v.strip().upper()
+        if v in VALID_STOREY_RANGES:
+            return v
+        # Snap a bare floor number to the nearest valid band
+        if re.match(r"^\d+$", v):
+            floor = int(v)
+            low = ((floor - 1) // 3) * 3 + 1
+            snapped = f"{low:02d} TO {low + 2:02d}"
+            if snapped in VALID_STOREY_RANGES:
+                return snapped
+        raise ValueError(f"storey_range must be one of {VALID_STOREY_RANGES}")
 
     @field_validator("town", "flat_type", "flat_model")
     @classmethod

@@ -1,4 +1,4 @@
-from constants import VALID_TOWNS, VALID_FLAT_TYPES, VALID_FLAT_MODELS
+from constants import VALID_TOWNS, VALID_FLAT_TYPES, VALID_FLAT_MODELS, VALID_STOREY_RANGES
 
 
 REQUIRED_PARAMS = {"town", "flat_type", "flat_model", "storey_range", "floor_area_sqm"}
@@ -52,8 +52,15 @@ Redirect examples:
 1. town               Valid: {', '.join(VALID_TOWNS)}
 2. flat_type          Valid: {', '.join(VALID_FLAT_TYPES)}
 3. flat_model         Valid: {', '.join(VALID_FLAT_MODELS)}
-4. storey_range       Format "NN TO NN". Infer from natural language:
-                      "around 8th floor" → "07 TO 09", "high floor ~20" → "19 TO 21"
+4. storey_range       Must be one of: {', '.join(VALID_STOREY_RANGES)}
+                      Map any floor number or description to the correct 3-floor band:
+                      - Each band covers 3 floors: 01-03, 04-06, 07-09, 10-12, ...
+                      - Formula: low = ((floor - 1) // 3) * 3 + 1, formatted as "LL TO HH"
+                      - Examples: 5 → "04 TO 06", 8 → "07 TO 09", 20 → "19 TO 21",
+                        "around 10th" → "10 TO 12", "high floor ~35" → "34 TO 36",
+                        "very high, around 50" → "49 TO 51"
+                      - If user says "low floor" assume 04 TO 06; "mid floor" assume 13 TO 15;
+                        "high floor" assume 22 TO 24 (ask to confirm if unsure)
 5. floor_area_sqm     Float, 20–300. Parse "~93sqm", "about 90 square meters" → float
 
 🟡 OPTIONAL (collect if user provides, improves accuracy):
