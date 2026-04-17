@@ -7,7 +7,7 @@ genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 def get_gemini_model() -> genai.GenerativeModel:
     """Create Gemini model with safety settings tuned for HDB chat."""
     return genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
+        model_name="gemini-2.5-flash-lite",
         generation_config=genai.GenerationConfig(
             temperature=0.4,
             max_output_tokens=1024,

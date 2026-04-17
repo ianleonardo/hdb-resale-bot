@@ -23,7 +23,7 @@ _SAFETY_SETTINGS = [
 def _get_model(system_instruction: str) -> genai.GenerativeModel:
     """Create a Gemini model with the given system instruction."""
     return genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
+        model_name="gemini-2.5-flash-lite",
         generation_config=_GENERATION_CONFIG,
         safety_settings=_SAFETY_SETTINGS,
         system_instruction=system_instruction,
@@ -86,7 +86,7 @@ def _parse_response(raw: str) -> dict:
 async def format_result_singlish(prediction: dict, params: dict) -> str:
     """Use Gemini to craft a warm Singlish result message."""
     model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
+        model_name="gemini-2.5-flash-lite",
         generation_config=genai.GenerationConfig(temperature=0.4, max_output_tokens=1024),
     )
     prompt = f"""
