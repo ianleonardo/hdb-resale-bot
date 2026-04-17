@@ -8,28 +8,28 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from google.cloud import storage
 
-from app.model_loader import load_model, load_preprocessor
+from app.model_loader import load_model, load_comp_lookup
 from app.preprocessing import build_inference_dataframe
 from app.schemas import PredictRequest, PredictResponse
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="HDB Resale Price Estimator", version="3.0.0")
-GCS_BUCKET = os.environ.get("GCS_BUCKET", "hdb-resale-artifacts")
-MODEL_VERSION = os.environ.get("MODEL_VERSION", "3.0.0")
+app = FastAPI(title="HDB Resale Price Estimator", version="4.0.0")
+GCS_BUCKET    = os.environ.get("GCS_BUCKET", "hdb-resale-artifacts")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "4.0.0")
 
 
 @app.on_event("startup")
 async def startup():
-    """Warm up model cache in a thread so the event loop stays responsive during loading."""
+    """Warm up model and comp lookup in background threads."""
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, load_model)
-        await loop.run_in_executor(None, load_preprocessor)
-        logger.info("Model and preprocessor loaded from GCS ✅")
+        await loop.run_in_executor(None, load_comp_lookup)
+        logger.info("CatBoost model and comp lookup loaded from GCS ✅")
     except Exception as exc:
-        logger.warning(f"Model not loaded at startup (will retry on first request): {exc}")
+        logger.warning(f"Artifacts not loaded at startup (will retry on first request): {exc}")
 
 
 @app.get("/health")
@@ -50,16 +50,15 @@ async def meta():
 @app.post("/predict", response_model=PredictResponse)
 async def predict(req: PredictRequest):
     try:
-        model        = load_model()
-        preprocessor = load_preprocessor()
+        model       = load_model()
+        comp_lookup = load_comp_lookup()
     except Exception as exc:
-        logger.error(f"Model unavailable: {exc}")
+        logger.error(f"Artifacts unavailable: {exc}")
         raise HTTPException(status_code=503, detail="Model not yet available. Run training pipeline first.")
 
-    df        = build_inference_dataframe(req)
-    features  = preprocessor.transform(df)
-    price     = float(np.expm1(model.predict(features)[0]))
-    margin    = price * 0.05
+    df     = build_inference_dataframe(req, comp_lookup)
+    price  = float(np.expm1(model.predict(df)[0]))
+    margin = price * 0.05
 
     result = PredictResponse(
         predicted_price=round(price, -3),
@@ -79,7 +78,7 @@ async def predict(req: PredictRequest):
 async def _log_prediction_to_gcs(req: PredictRequest, result: PredictResponse):
     """Append prediction as JSON to GCS — async, non-blocking."""
     try:
-        now = datetime.now(timezone.utc)
+        now    = datetime.now(timezone.utc)
         record = {
             "timestamp":       now.isoformat(),
             "input":           req.model_dump(),
@@ -91,8 +90,7 @@ async def _log_prediction_to_gcs(req: PredictRequest, result: PredictResponse):
             f"/pred_{now.timestamp():.0f}.json"
         )
         client = storage.Client()
-        bucket = client.bucket(GCS_BUCKET)
-        bucket.blob(path).upload_from_string(
+        client.bucket(GCS_BUCKET).blob(path).upload_from_string(
             json.dumps(record) + "\n", content_type="application/json"
         )
     except Exception as exc:
