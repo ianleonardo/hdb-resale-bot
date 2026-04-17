@@ -22,10 +22,11 @@ MODEL_VERSION = os.environ.get("MODEL_VERSION", "3.0.0")
 
 @app.on_event("startup")
 async def startup():
-    """Attempt to warm up model cache on startup. Non-fatal if artifacts not yet in GCS."""
+    """Warm up model cache in a thread so the event loop stays responsive during loading."""
+    loop = asyncio.get_event_loop()
     try:
-        load_model()
-        load_preprocessor()
+        await loop.run_in_executor(None, load_model)
+        await loop.run_in_executor(None, load_preprocessor)
         logger.info("Model and preprocessor loaded from GCS ✅")
     except Exception as exc:
         logger.warning(f"Model not loaded at startup (will retry on first request): {exc}")
