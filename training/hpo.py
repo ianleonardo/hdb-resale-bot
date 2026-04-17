@@ -15,6 +15,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GCS_BUCKET = "hdb-resale-artifacts"
+DATA_BLOB  = "training/Resaleflatpricesbase.csv"
 TARGET     = "log_resale_price"
 
 # Populated by prepare_data()
@@ -24,7 +25,7 @@ X_train = X_val = y_train = y_val = None
 def prepare_data():
     global X_train, X_val, y_train, y_val
     gcs = storage.Client()
-    csv_bytes = gcs.bucket(GCS_BUCKET).blob("training/hdb_resale_2017_2026.csv").download_as_bytes()
+    csv_bytes = gcs.bucket(GCS_BUCKET).blob(DATA_BLOB).download_as_bytes()
     df = engineer_features(pd.read_csv(io.BytesIO(csv_bytes)))
 
     train = df[df["transaction_year"] <= 2024]
@@ -47,7 +48,8 @@ def objective(trial: optuna.Trial) -> float:
         "reg_alpha":         trial.suggest_float("reg_alpha", 1e-3, 10, log=True),
         "reg_lambda":        trial.suggest_float("reg_lambda", 1e-3, 10, log=True),
     }
-    model = lgb.LGBMRegressor(n_estimators=500, **params, random_state=42, n_jobs=-1)
+    # Use 2000 estimators with early stopping — matches the final training budget
+    model = lgb.LGBMRegressor(n_estimators=2000, **params, random_state=42, n_jobs=-1)
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],

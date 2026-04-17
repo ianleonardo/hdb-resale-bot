@@ -61,6 +61,17 @@ def plot_residuals(y_true_log: pd.Series, y_pred_log: np.ndarray, title: str = "
     return fig
 
 
+def segment_diagnostics(df: pd.DataFrame, y_pred_log: np.ndarray, segment_col: str) -> pd.DataFrame:
+    """Compute MAE and MAPE per segment value for a given column."""
+    df = df.copy()
+    df["_pred_log"] = y_pred_log
+    rows = []
+    for val, grp in df.groupby(segment_col):
+        m = compute_metrics(grp["log_resale_price"], grp["_pred_log"].values)
+        rows.append({"segment": val, "n": len(grp), "MAE": m["MAE"], "MAPE": m["MAPE"]})
+    return pd.DataFrame(rows).sort_values("MAE", ascending=False).reset_index(drop=True)
+
+
 def run_evaluation(data_path: str):
     """Run full evaluation on a CSV file. Expects raw HDB resale columns."""
     df = engineer_features(pd.read_csv(data_path))
@@ -74,6 +85,14 @@ def run_evaluation(data_path: str):
         f"MAE={metrics['MAE']:,.0f} | RMSE={metrics['RMSE']:,.0f} | "
         f"MAPE={metrics['MAPE']:.2f}% | R²={metrics['R2']:.4f}"
     )
+
+    # Segment-level diagnostics — surfaces where the model underperforms
+    for col in ("town", "flat_type", "storey_range"):
+        if col not in df.columns:
+            continue
+        seg = segment_diagnostics(df, y_pred_log, col)
+        logger.info(f"\n--- MAE by {col} (worst first) ---\n{seg.to_string(index=False)}")
+
     return metrics
 
 
