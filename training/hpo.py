@@ -9,7 +9,7 @@ import pandas as pd
 from google.cloud import storage
 from sklearn.metrics import mean_absolute_error
 
-from training.preprocessing import build_preprocessor, engineer_features, ALL_FEATURES
+from preprocessing import build_preprocessor, engineer_features, ALL_FEATURES
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
