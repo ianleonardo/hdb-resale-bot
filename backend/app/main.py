@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from google.cloud import storage
 
@@ -57,7 +58,7 @@ async def predict(req: PredictRequest):
 
     df        = build_inference_dataframe(req)
     features  = preprocessor.transform(df)
-    price     = float(model.predict(features)[0])
+    price     = float(np.expm1(model.predict(features)[0]))
     margin    = price * 0.05
 
     result = PredictResponse(

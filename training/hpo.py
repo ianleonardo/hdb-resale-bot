@@ -3,6 +3,7 @@ import logging
 
 import joblib
 import lightgbm as lgb
+import numpy as np
 import optuna
 import pandas as pd
 from google.cloud import storage
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 GCS_BUCKET = "hdb-resale-artifacts"
 DATA_BLOB  = "training/Resaleflatpricesbase.csv"
-TARGET     = "resale_price"
+TARGET     = "log_resale_price"
 
 # Populated by prepare_data()
 X_train = X_val = y_train = y_val = None
@@ -49,7 +50,7 @@ def objective(trial: optuna.Trial) -> float:
     }
     # Use 2000 estimators with early stopping — matches the final training budget
     model = lgb.LGBMRegressor(
-        n_estimators=5000, objective="regression_l1", metric="mae",
+        n_estimators=5000, metric="mae",
         **params, random_state=42, n_jobs=-1,
     )
     model.fit(
@@ -57,7 +58,7 @@ def objective(trial: optuna.Trial) -> float:
         eval_set=[(X_val, y_val)],
         callbacks=[lgb.early_stopping(100), lgb.log_evaluation(0)],
     )
-    return mean_absolute_error(y_val, model.predict(X_val))
+    return mean_absolute_error(np.expm1(y_val), np.expm1(model.predict(X_val)))
 
 
 def main(n_trials: int = 100):

@@ -1,0 +1,88 @@
+"""
+hpo_v2.py — Optuna hyperparameter search for the v2 model (with comp features).
+
+Run after train_v2.py has confirmed comp features help, then paste best_params
+into train_v2.py to replace the placeholder defaults.
+"""
+
+import io
+import logging
+
+import joblib
+import lightgbm as lgb
+import numpy as np
+import optuna
+import pandas as pd
+from google.cloud import storage
+from sklearn.metrics import mean_absolute_error
+
+from preprocessing_v2 import (
+    ALL_FEATURES, TARGET, build_preprocessor,
+    engineer_features, compute_comp_features,
+)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+GCS_BUCKET = "hdb-resale-artifacts"
+DATA_BLOB  = "training/Resaleflatpricesbase.csv"
+
+# Module-level — populated once by prepare_data()
+X_train = X_val = y_train = y_val = None
+
+
+def prepare_data():
+    global X_train, X_val, y_train, y_val
+
+    gcs = storage.Client()
+    csv_bytes = gcs.bucket(GCS_BUCKET).blob(DATA_BLOB).download_as_bytes()
+    raw = pd.read_csv(io.BytesIO(csv_bytes))
+
+    logger.info("Engineering features + computing comps on full dataset...")
+    df = engineer_features(raw)
+    df = compute_comp_features(df)
+
+    train = df[(df["transaction_year"] >= 2017) & (df["transaction_year"] <= 2024)]
+    val   = df[(df["transaction_year"] == 2025) & (df["transaction_month"] <= 9)]
+
+    preprocessor = build_preprocessor()
+    X_train = preprocessor.fit_transform(train[ALL_FEATURES], train[TARGET])
+    X_val   = preprocessor.transform(val[ALL_FEATURES])
+    y_train, y_val = train[TARGET], val[TARGET]
+    logger.info(f"Data ready — train: {len(train)}, val: {len(val)}")
+
+
+def objective(trial: optuna.Trial) -> float:
+    params = {
+        "num_leaves":        trial.suggest_int("num_leaves", 63, 511),
+        "learning_rate":     trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+        "min_child_samples": trial.suggest_int("min_child_samples", 10, 150),
+        "subsample":         trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.4, 1.0),
+        "reg_alpha":         trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+        "reg_lambda":        trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+    }
+    model = lgb.LGBMRegressor(
+        n_estimators=5000, metric="mae",
+        **params, random_state=42, n_jobs=-1,
+    )
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        callbacks=[lgb.early_stopping(100), lgb.log_evaluation(0)],
+    )
+    return mean_absolute_error(np.expm1(y_val), np.expm1(model.predict(X_val)))
+
+
+def main(n_trials: int = 100):
+    prepare_data()
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials)
+    logger.info(f"Best MAE: {study.best_value:,.0f}")
+    logger.info(f"Best params: {study.best_params}")
+    joblib.dump(study, "artifacts/hpo_v2_study.pkl")
+    return study.best_params
+
+
+if __name__ == "__main__":
+    main()

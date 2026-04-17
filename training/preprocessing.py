@@ -65,4 +65,5 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     # Combine block + street for a single high-cardinality location feature
     df["block_street"] = df["block"].astype(str).str.strip() + " " + df["street_name"].astype(str).str.strip()
 
+    df["log_resale_price"] = np.log1p(df["resale_price"])
     return df

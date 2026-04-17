@@ -22,7 +22,7 @@ LOCAL_DATA      = Path("../data")
 LOCAL_ARTIFACTS = Path("artifacts/")
 LOCAL_ARTIFACTS.mkdir(exist_ok=True)
 
-TARGET = "resale_price"
+TARGET = "log_resale_price"
 
 
 def load_data() -> pd.DataFrame:
@@ -73,12 +73,13 @@ def save_splits(train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame):
         logger.info(f"Uploaded gs://{GCS_BUCKET}/{blob_path}")
 
 
-def evaluate(name: str, model, X, y: pd.Series) -> dict:
-    pred = model.predict(X)
-    mae  = mean_absolute_error(y, pred)
-    rmse = float(np.sqrt(mean_squared_error(y, pred)))
-    mape = float(np.mean(np.abs((y - pred) / y)) * 100)
-    r2   = r2_score(y, pred)
+def evaluate(name: str, model, X, y_log: pd.Series) -> dict:
+    pred = np.expm1(model.predict(X))
+    true = np.expm1(y_log)
+    mae  = mean_absolute_error(true, pred)
+    rmse = float(np.sqrt(mean_squared_error(true, pred)))
+    mape = float(np.mean(np.abs((true - pred) / true)) * 100)
+    r2   = r2_score(true, pred)
     logger.info(f"{name}: MAE={mae:,.0f} | RMSE={rmse:,.0f} | MAPE={mape:.2f}% | R²={r2:.4f}")
     return {"MAE": mae, "RMSE": rmse, "MAPE": mape, "R2": r2}
 
@@ -102,7 +103,7 @@ def main():
     y_train, y_val, y_test = train_df[TARGET], val_df[TARGET], test_df[TARGET]
 
     model = lgb.LGBMRegressor(
-        n_estimators=5000, objective="regression_l1", metric="mae",
+        n_estimators=5000, metric="mae",
         # HPO best params (trial 85/100, val MAE=46,103 — re-tune after objective change)
         num_leaves=181, learning_rate=0.050, min_child_samples=82,
         subsample=0.738, colsample_bytree=0.537,
