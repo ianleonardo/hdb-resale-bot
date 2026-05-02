@@ -83,7 +83,8 @@ async def predict(req: PredictRequest):
         ) from exc
 
     # Conservative haircut vs raw model output (business calibration).
-    price = float(np.expm1(model.predict(pool)[0])) * 0.95
+    calibration_factor = 1
+    price = float(np.expm1(model.predict(pool)[0])) * calibration_factor
     margin = price * 0.05
 
     result = PredictResponse(
