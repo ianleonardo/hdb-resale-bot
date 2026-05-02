@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -79,16 +80,67 @@ def _normalize_street_label(s: object) -> str:
     return " ".join(t.split())
 
 
-def _fuzzy_pick_normalized(query: str, normalized_candidates: list[str], cutoff: float = 0.55) -> str | None:
-    """Return normalized lookup key closest to query (difflib — resilient to typos / spacing)."""
-    q = _normalize_street_label(query)
+def _expand_street_query(q_norm: str) -> str:
+    """Expand spoken abbreviations before similarity scoring."""
+    x = q_norm
+    x = re.sub(r"\bTJ\b", "TANJONG", x)
+    x = re.sub(r"\bTG\b", "TANJONG", x)
+    return x
+
+
+def _reject_confusable_street_pair(query_norm: str, cand_norm: str, ratio: float) -> bool:
+    """Block Tanjong-Pagar-area hints from snapping to Tiong Bahru streets (and vice versa)."""
+    if ratio >= 0.93:
+        return False
+    q, c = query_norm, cand_norm
+    q_has_tanjong = "TANJONG" in q
+    q_has_tiong = "TIONG" in q
+    c_has_tanjong = "TANJONG" in c
+    c_has_tiong = "TIONG" in c
+    if q_has_tanjong and c_has_tiong and not c_has_tanjong:
+        return True
+    if q_has_tiong and c_has_tanjong and not c_has_tiong:
+        return True
+    return False
+
+
+def _fuzzy_pick_normalized(
+    query: str,
+    normalized_candidates: list[str],
+    *,
+    min_ratio: float = 0.68,
+    min_margin: float = 0.06,
+) -> str | None:
+    """Pick canonical street key: ratio-based match + ambiguity gap + Tanjong/Tiong guard."""
+    q_raw = _normalize_street_label(query)
+    q = _expand_street_query(q_raw)
     uniq = list(dict.fromkeys([c for c in normalized_candidates if c]))
     if not uniq:
         return None
+    if q_raw in uniq:
+        return q_raw
     if q in uniq:
         return q
-    m = difflib.get_close_matches(q, uniq, n=1, cutoff=cutoff)
-    return m[0] if m else None
+
+    scored: list[tuple[float, str]] = []
+    for c in uniq:
+        r = max(
+            difflib.SequenceMatcher(None, q_raw, c).ratio(),
+            difflib.SequenceMatcher(None, q, c).ratio(),
+        )
+        if _reject_confusable_street_pair(q, c, r):
+            continue
+        scored.append((r, c))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    best_r, best_c = scored[0]
+    if best_r < min_ratio:
+        return None
+    if len(scored) > 1 and best_r - scored[1][0] < min_margin:
+        return None
+    return best_c
 
 
 def _lookup_row_to_ctx(row: pd.Series) -> dict:

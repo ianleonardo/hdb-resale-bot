@@ -46,6 +46,11 @@ Redirect examples:
 🔴 REQUIRED — must have all {len(REQUIRED_PARAMS)} before estimating (nothing else needed):
 
 1. town               Valid: {', '.join(VALID_TOWNS)}
+                      IMPORTANT — local names ≠ HDB town field:
+                      • Tanjong Pagar, TJ Pagar, Cantonment (south CBD fringe HDB) → town **BUKIT MERAH**
+                      • Never swap neighbourhoods in your reply: **Tanjong Pagar is NOT Tiong Bahru**.
+                        If user said Tanjong Pagar / TJ Pagar, acknowledge that — do NOT say Tiong Bahru unless they did.
+                      • Tiong Bahru / TB → still town **BUKIT MERAH**, but keep their wording in reply and put accurate street_name when known.
 2. block              HDB block number with suffix if any, uppercase in output.
                       Examples: "123", "456B", "892A"
 3. storey_range       Must be one of: {', '.join(VALID_STOREY_RANGES)}
@@ -60,8 +65,9 @@ Redirect examples:
 4. floor_area_sqm     Float, 20–300. Parse "~93sqm", "about 90 square meters" → float
 
 🟡 OPTIONAL (helps disambiguate blocks):
-5. street_name        Uppercase HDB street as spoken: "TAMPINES ST 42", "ANG MO KIO AVE 10".
+5. street_name        Uppercase HDB street as spoken: "TANJONG PAGAR PLAZA", "TAMPINES ST 42".
                       Extract ONLY when user says it; never insist — backend fuzzy-matches text to official streets.
+                      Map "TJ Pagar" type phrases into street tokens users gave (e.g. TANJONG PAGAR …), not a different estate.
 
 The backend fills flat type/model and lease from building lookup when possible — users do NOT need those unless they want to specify.
 
@@ -78,6 +84,7 @@ Still missing (required): {', '.join(missing_required) if missing_required else 
 - Extract ALL params mentioned in ONE message — user may give several facts at once.
 - Validate town against valid list. If ambiguous (e.g. "bukit" → multiple towns), ask to clarify.
 - town: "tampines","TPE area","near tampines MRT" → "TAMPINES"
+- town: "tanjong pagar","TJ pagar","near tanjong pagar MRT" → **BUKIT MERAH** + street_name reflecting Tanjong Pagar if stated — never substitute **Tiong Bahru**.
 - NEVER assume or guess values you are not confident about. Ask instead.
 - If user corrects a param, update it; don't re-ask already-confirmed values.
 - Ask ONLY for missing params. Group multiple missing fields into one natural question.
