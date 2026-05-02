@@ -74,13 +74,14 @@ TEST_YEAR_START  = 2026
 TEST_YEAR_END    = 2026  # single held-out year; bump TEST_YEAR_END when adding future tests
 
 # ── CatBoost hyperparameters (Optuna / manual tuned) ────────────────────────────
-DEPTH                 = 4
-LEARNING_RATE         = 0.14685
-L2_LEAF_REG           = 2.24883
-RANDOM_STRENGTH       = 7.84508
-BAGGING_TEMPERATURE   = 1.46049
-BORDER_COUNT          = 249
-MIN_DATA_IN_LEAF      = 41
+# HPO snapshot 2026-05-02
+DEPTH                 = 5
+LEARNING_RATE         = 0.294152
+L2_LEAF_REG           = 12.2505
+RANDOM_STRENGTH       = 0.183718
+BAGGING_TEMPERATURE   = 0.986251
+BORDER_COUNT          = 203
+MIN_DATA_IN_LEAF      = 45
 
 # ── Feature drop lists (following hdb_ml_pipeline_v20 DROP_COLS logic) ─────────
 REDUNDANT_COLS = [

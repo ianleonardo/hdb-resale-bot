@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-05-02T14:18:32.374636+00:00",
+  "trained_at": "2026-05-02T15:25:44.384973+00:00",
   "model": "catboost-v2",
   "split": {
     "train_years": [
@@ -18,37 +18,37 @@
   "catboost_hparams": {
     "loss_function": "MAE",
     "eval_metric": "MAE",
-    "depth": 4,
-    "learning_rate": 0.14685,
-    "l2_leaf_reg": 2.24883,
-    "random_strength": 7.84508,
-    "bagging_temperature": 1.46049,
-    "border_count": 249,
-    "min_data_in_leaf": 41,
+    "depth": 5,
+    "learning_rate": 0.294152,
+    "l2_leaf_reg": 12.2505,
+    "random_strength": 0.183718,
+    "bagging_temperature": 0.986251,
+    "border_count": 203,
+    "min_data_in_leaf": 45,
     "random_seed": 42,
     "early_stopping_rounds": 100
   },
-  "best_iteration": 993,
+  "best_iteration": 995,
   "train": {
-    "MAE": 19091.576415424468,
-    "RMSE": 27548.52133005175,
-    "MAPE": 3.594094866736845,
-    "R2": 0.974561695331188,
-    "log_RMSE": 0.04956080271256317
+    "MAE": 16268.895640541941,
+    "RMSE": 23886.723104051947,
+    "MAPE": 3.097334532389194,
+    "R2": 0.9808748553351325,
+    "log_RMSE": 0.04395086100621128
   },
   "validation": {
-    "MAE": 28989.555477166436,
-    "RMSE": 43715.55380204412,
-    "MAPE": 4.262970508765166,
-    "R2": 0.9511273582732834,
-    "log_RMSE": 0.058321558195679274
+    "MAE": 26852.73225821335,
+    "RMSE": 39200.19299100451,
+    "MAPE": 4.050996223643172,
+    "R2": 0.9607020174074616,
+    "log_RMSE": 0.05424003673025472
   },
   "test": {
-    "MAE": 31816.396228474332,
-    "RMSE": 48808.71775245448,
-    "MAPE": 4.66829999927553,
-    "R2": 0.944085176494082,
-    "log_RMSE": 0.06504615020253536
+    "MAE": 29758.916889050743,
+    "RMSE": 42220.19576478859,
+    "MAPE": 4.5785746730730015,
+    "R2": 0.9581618332263931,
+    "log_RMSE": 0.06017373779638336
   },
   "n_features": 49,
   "features": [
