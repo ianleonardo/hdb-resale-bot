@@ -14,6 +14,7 @@ from app.model_loader import (
     load_block_lookup,
     load_inference_metrics,
     load_model,
+    load_rpi_quarters_df,
     load_spatial_bundle,
 )
 from app.preprocessing import build_inference_pool
@@ -29,20 +30,26 @@ MODEL_VERSION = os.environ.get("MODEL_VERSION", "catboost-v2")
 
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, exc: RequestValidationError):
-    """Log body shape issues (e.g. bad storey_range) — default 422 JSON detail preserved."""
-    logger.warning("predict validation failed: %s", exc.errors())
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    """Log body shape issues — ERROR so Cloud Logging shows up next to uvicorn access lines."""
+    detail = exc.errors()
+    try:
+        payload = json.dumps(detail, default=str)
+    except TypeError:
+        payload = str(detail)
+    logger.error("POST /predict validation failed: %s", payload)
+    return JSONResponse(status_code=422, content={"detail": detail})
 
 
 @app.on_event("startup")
 async def startup():
-    """Warm model + v2 inference artifacts (metrics, spatial bundle, block lookup)."""
+    """Warm model + v2 inference artifacts (metrics, spatial bundle, block lookup, RPI)."""
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, load_model)
         await loop.run_in_executor(None, load_inference_metrics)
         await loop.run_in_executor(None, load_spatial_bundle)
         await loop.run_in_executor(None, load_block_lookup)
+        await loop.run_in_executor(None, load_rpi_quarters_df)
         logger.info("CatBoost v2 artifacts warmed ✅")
     except Exception as exc:
         logger.warning("Artifacts not loaded at startup (will retry on first request): %s", exc)

@@ -204,8 +204,11 @@ def engineer_features(df: pd.DataFrame, mall_dist_median: float) -> pd.DataFrame
     return df
 
 
-def add_official_rpi(df: pd.DataFrame, rpi_path: Path) -> pd.DataFrame:
-    rpi = pd.read_csv(rpi_path)[["year", "quarter", "rpi"]]
+def add_official_rpi(df: pd.DataFrame, rpi_source: Path | pd.DataFrame) -> pd.DataFrame:
+    if isinstance(rpi_source, pd.DataFrame):
+        rpi = rpi_source[["year", "quarter", "rpi"]].copy()
+    else:
+        rpi = pd.read_csv(rpi_source)[["year", "quarter", "rpi"]]
     rpi_map = rpi.set_index(["year", "quarter"])["rpi"].to_dict()
 
     def _lagged_rpi(year: int, month: int) -> float:

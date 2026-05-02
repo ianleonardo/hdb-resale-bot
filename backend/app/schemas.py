@@ -1,7 +1,21 @@
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+
+# Gemini sometimes sends qualitative storey bands instead of canonical HDB strings.
+_QUALITATIVE_STOREY = {
+    "LOW": "04 TO 06",
+    "LOW FLOOR": "04 TO 06",
+    "GROUND": "01 TO 03",
+    "GROUND FLOOR": "01 TO 03",
+    "MID": "13 TO 15",
+    "MIDDLE": "13 TO 15",
+    "MID FLOOR": "13 TO 15",
+    "HIGH": "22 TO 24",
+    "HIGH FLOOR": "22 TO 24",
+}
 
 
 class PredictRequest(BaseModel):
@@ -18,6 +32,41 @@ class PredictRequest(BaseModel):
     remaining_lease_years: Optional[float] = Field(default=None, ge=0.0, le=99.0)
     street_name:           Optional[str]   = None
 
+    model_config = {"extra": "ignore"}
+
+    @field_validator("floor_area_sqm", mode="before")
+    @classmethod
+    def coerce_floor_area_sqm(cls, v: Any) -> Any:
+        """Accept ints/floats and messy strings ('93 sqm', '~90', '93.5 sq metres')."""
+        if isinstance(v, bool):
+            raise ValueError("floor_area_sqm must be numeric")
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            s = v.strip().lower().replace(",", "")
+            m = re.search(r"(\d+(?:\.\d+)?)", s)
+            if m:
+                return float(m.group(1))
+        raise ValueError("floor_area_sqm must be a number")
+
+    @field_validator("remaining_lease_years", mode="before")
+    @classmethod
+    def coerce_remaining_lease(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        if isinstance(v, str):
+            try:
+                return float(v.strip().replace(",", ""))
+            except ValueError:
+                return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        return None
+
     @field_validator("storey_range")
     @classmethod
     def validate_storey(cls, v: str) -> str:
@@ -25,6 +74,8 @@ class PredictRequest(BaseModel):
         v = v.strip().upper()
         v = re.sub(r"\s*-\s*", " TO ", v)
         v = re.sub(r"\s+", " ", v).strip()
+        if v in _QUALITATIVE_STOREY:
+            v = _QUALITATIVE_STOREY[v]
         if v in VALID_STOREY_RANGES:
             return v
         # LLMs often emit "7 TO 9" instead of zero-padded canonical bands

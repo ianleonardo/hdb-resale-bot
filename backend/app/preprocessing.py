@@ -5,9 +5,7 @@ Build CatBoost Pool rows matching training/v2 feature schema from minimal Predic
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -24,13 +22,15 @@ from app.inference_features import (
     prepare_X,
     query_coords_from_lat_lon,
 )
-from app.model_loader import load_block_lookup, load_inference_metrics, load_spatial_bundle
+from app.model_loader import (
+    load_block_lookup,
+    load_inference_metrics,
+    load_rpi_quarters_df,
+    load_spatial_bundle,
+)
 from app.schemas import PredictRequest
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_RPI = Path(__file__).resolve().parents[2] / "data" / "hdb_rpi.csv"
-_RPI_PATH = Path(os.environ.get("HDB_RPI_PATH", str(_DEFAULT_RPI)))
 
 TZ_SG = ZoneInfo("Asia/Singapore")
 
@@ -185,11 +185,7 @@ def build_inference_pool(req: PredictRequest) -> Pool:
     df = pd.DataFrame([raw])
     df = engineer_features(df, mall_med)
 
-    if not _RPI_PATH.exists():
-        logger.warning("hdb_rpi.csv missing at %s — using neutral placeholder index", _RPI_PATH)
-        df["hdb_rpi"] = 180.0
-    else:
-        df = add_official_rpi(df, _RPI_PATH)
+    df = add_official_rpi(df, load_rpi_quarters_df())
 
     df = add_macro_interaction_features(df)
 

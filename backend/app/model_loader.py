@@ -20,8 +20,9 @@ MODEL_BLOB           = os.environ.get("MODEL_BLOB", "models/model_catboost_v2.cb
 METRICS_BLOB         = os.environ.get("METRICS_BLOB", "models/metrics_catboost_v2.json")
 SPATIAL_BLOB         = os.environ.get("SPATIAL_BLOB", "models/spatial_inference.pkl")
 BLOCK_LOOKUP_BLOB    = os.environ.get("BLOCK_LOOKUP_BLOB", "models/block_lookup.parquet")
+RPI_BLOB             = os.environ.get("RPI_BLOB", "hdb_rpi.csv")
 
-# Local dir with all four files (development); when set, skips GCS download.
+# Local dir with artifact files (development); when set, skips GCS for matching basenames.
 BACKEND_ARTIFACT_DIR = os.environ.get("BACKEND_ARTIFACT_DIR", "").strip()
 
 
@@ -105,4 +106,31 @@ def load_block_lookup() -> pd.DataFrame:
     df["block"] = df["block"].astype(str).str.strip().str.upper()
     df = df.drop_duplicates(["town", "block"]).set_index(["town", "block"], verify_integrity=False)
     logger.info("block_lookup loaded — %s rows ✅", len(df))
+    return df
+
+
+@lru_cache(maxsize=1)
+def load_rpi_quarters_df() -> pd.DataFrame:
+    """Official HDB RPI quarters — same resolution path as other artifacts (local env → BACKEND_ARTIFACT_DIR → GCS)."""
+    explicit = os.environ.get("HDB_RPI_PATH", "").strip()
+    if explicit:
+        ep = Path(explicit)
+        if ep.is_file():
+            df = pd.read_csv(ep)
+            df = df[["year", "quarter", "rpi"]].copy()
+            logger.info("hdb_rpi loaded from HDB_RPI_PATH (%s quarters)", len(df))
+            return df
+
+    fname = RPI_BLOB.rsplit("/", 1)[-1]
+    lp = _local_path(fname)
+    if lp:
+        df = pd.read_csv(lp)
+        df = df[["year", "quarter", "rpi"]].copy()
+        logger.info("hdb_rpi loaded from BACKEND_ARTIFACT_DIR (%s quarters)", len(df))
+        return df
+
+    client = storage.Client()
+    raw = client.bucket(GCS_BUCKET).blob(RPI_BLOB).download_as_bytes()
+    df = pd.read_csv(io.BytesIO(raw))[["year", "quarter", "rpi"]].copy()
+    logger.info("hdb_rpi loaded from gs://%s/%s (%s quarters)", GCS_BUCKET, RPI_BLOB, len(df))
     return df
