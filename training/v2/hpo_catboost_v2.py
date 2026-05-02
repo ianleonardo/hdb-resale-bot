@@ -3,18 +3,21 @@ hpo_catboost_v2.py — Optuna hyperparameter search for CatBoost v2 (MAE objecti
 
 Design:
   - Rolling forward validation: each fold uses train = [MIN_YEAR, val_year), val = val_year.
-  - Primary metric: MAE on resale price (SGD), i.e. mean_absolute_error(expm1(pred_log), expm1(y_log)).
-  - CatBoost fitted with loss_function/eval_metric MAE on log_resale_price for stable trees.
-  - Each trial scores median over folds of (median over random seeds of val MAE). Optuna minimizes that.
+  - Primary metric: MAE on log_resale_price — same scale as CatBoost loss_function/eval_metric MAE (Option A).
+  - Each trial scores median over folds of (median over random seeds of val MAE on log target). Optuna minimizes that.
 
-Final production training (train_catboost_v2.py) still uses train 2017–2024, val 2025, test 2026 — untouched by this search.
+Final production training (train_catboost_v2.py) uses train 2020–2024, val 2025, test 2026.
+Rolling HPO folds use only years before the final val year (see DEFAULT_FOLD_VAL_YEARS).
 
 Usage:
     python hpo_catboost_v2.py --trials 80
-    python hpo_catboost_v2.py --trials 20 --fold-years 2023 2024 --seeds 42 43
+    python hpo_catboost_v2.py --trials 20 --fold-years 2021 2022 2023 2024 --seeds 42 43
 
 Study resume:
     study = joblib.load("artifacts/hpo_catboost_v2_study.pkl")
+
+If you previously ran HPO when the objective was MAE in SGD (expm1), delete or
+rename that study pickle before resuming — trial values are not comparable.
 """
 
 from __future__ import annotations
@@ -38,11 +41,14 @@ from train_catboost_v2 import (  # noqa: E402
     DATA_PATH,
     RPI_PATH,
     TARGET,
+    TRAIN_YEAR_START,
+    VAL_YEAR,
     CAT_FEATURES,
     DROP_COLS,
     LOCAL_ARTIFACTS,
     MLFLOW_URI,
     EXPERIMENT_NAME,
+    add_macro_interaction_features,
     add_official_rpi,
     compute_spatial_features,
     engineer_features,
@@ -59,8 +65,9 @@ STUDY_PATH = LOCAL_ARTIFACTS / "hpo_catboost_v2_study.pkl"
 HPO_ITERATIONS = 3000
 EARLY_STOP = 100
 
-MIN_TRAIN_YEAR = 2017
-DEFAULT_FOLD_VAL_YEARS = (2022, 2023, 2024)
+# Align with train_catboost_v2: rolling val years must be < VAL_YEAR (2025).
+MIN_TRAIN_YEAR = TRAIN_YEAR_START
+DEFAULT_FOLD_VAL_YEARS = tuple(y for y in (2021, 2022, 2023, 2024) if y < VAL_YEAR)
 DEFAULT_HPO_SEEDS = (42, 142, 242)
 
 MIN_ROWS_TRAIN = 3_000
@@ -70,9 +77,9 @@ MIN_ROWS_VAL = 400
 _FOLD_POOLS: dict[int, tuple[Pool, Pool, pd.Series]] = {}
 
 
-def _sgd_mae(y_log: pd.Series | np.ndarray, pred_log: np.ndarray) -> float:
-    yv = np.expm1(np.asarray(y_log).ravel())
-    pv = np.expm1(np.asarray(pred_log).ravel())
+def _log_target_mae(y_log: pd.Series | np.ndarray, pred_log: np.ndarray) -> float:
+    yv = np.asarray(y_log, dtype=np.float64).ravel()
+    pv = np.asarray(pred_log, dtype=np.float64).ravel()
     return float(mean_absolute_error(yv, pv))
 
 
@@ -101,6 +108,8 @@ def prepare_rolling_folds(fold_val_years: tuple[int, ...]) -> None:
         val_df = engineer_features(raw_val, mall_med)
         train_df = add_official_rpi(train_df, RPI_PATH)
         val_df = add_official_rpi(val_df, RPI_PATH)
+        train_df = add_macro_interaction_features(train_df)
+        val_df = add_macro_interaction_features(val_df)
 
         empty_te = train_df.iloc[:0].copy()
         tr_sp, va_sp, _ = compute_spatial_features(train_df, val_df, empty_te)
@@ -160,14 +169,14 @@ def make_objective(seeds: tuple[int, ...]):
                 )
                 model.fit(tr_pool, eval_set=va_pool, use_best_model=True)
                 pred_log = model.predict(va_pool)
-                seed_maes.append(_sgd_mae(y_va, pred_log))
+                seed_maes.append(_log_target_mae(y_va, pred_log))
 
             med_seed = float(np.median(seed_maes))
             fold_aggregate_scores.append(med_seed)
-            trial.set_user_attr(f"fold_{val_year}_medseed_mae", med_seed)
+            trial.set_user_attr(f"fold_{val_year}_medseed_mae_log", med_seed)
 
         score = float(np.median(fold_aggregate_scores))
-        trial.set_user_attr("median_fold_median_seed_mae", score)
+        trial.set_user_attr("median_fold_median_seed_mae_log", score)
         trial.set_user_attr("fold_years_used", tuple(sorted(_FOLD_POOLS.keys())))
         return score
 
@@ -177,8 +186,8 @@ def make_objective(seeds: tuple[int, ...]):
 def _mlflow_callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
     mlflow.log_metrics(
         {
-            "trial_val_med_mae_sgd": trial.value,
-            "best_med_mae_so_far": study.best_value,
+            "trial_val_med_mae_log": trial.value,
+            "best_med_mae_log_so_far": study.best_value,
         },
         step=trial.number,
     )
@@ -216,7 +225,7 @@ def main(
             "model":           "catboost",
             "phase":           "hpo",
             "optimizer":       "optuna_tpe",
-            "objective":       "median_fold_median_seed_val_MAE_SGD",
+            "objective":       "median_fold_median_seed_val_MAE_log_target",
             "rolling_folds":   folds_str,
             "hpo_seeds":       seeds_str,
         })
@@ -242,7 +251,7 @@ def main(
         best = study.best_params
 
         mlflow.log_metrics({
-            "best_median_fold_med_seed_MAE_SGD": study.best_value,
+            "best_median_fold_med_seed_MAE_log": study.best_value,
             "t_hpo_total_s": elapsed,
             "t_per_trial_s_approx": elapsed / max(n_trials, 1),
         })
@@ -252,10 +261,16 @@ def main(
     logger.info("Study saved → %s", STUDY_PATH)
 
     logger.info("\n%s", "=" * 60)
-    logger.info("HPO complete — metric = median over folds of median-over-seeds val MAE (SGD)")
+    logger.info(
+        "HPO complete — metric = median over folds of median-over-seeds val MAE on log_resale_price"
+    )
     logger.info("Folds (val years): %s", sorted(_FOLD_POOLS.keys()))
     logger.info("Seeds per fold: %s", seeds)
-    logger.info("Best trial #%s | objective %,.0f", best_trial.number, study.best_value)
+    logger.info(
+        "Best trial #%s | objective MAE(log) %.6f",
+        best_trial.number,
+        study.best_value,
+    )
     logger.info("\nPaste into train_catboost_v2.py:")
     for k, v in best.items():
         fmt = f"{v:.6g}" if isinstance(v, float) else str(v)

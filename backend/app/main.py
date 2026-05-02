@@ -5,7 +5,9 @@ import os
 from datetime import datetime, timezone
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from google.cloud import storage
 
 from app.model_loader import (
@@ -23,6 +25,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="HDB Resale Price Estimator", version="5.0.0")
 GCS_BUCKET    = os.environ.get("GCS_BUCKET", "hdb-resale-artifacts")
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "catboost-v2")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """Log body shape issues (e.g. bad storey_range) — default 422 JSON detail preserved."""
+    logger.warning("predict validation failed: %s", exc.errors())
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 @app.on_event("startup")

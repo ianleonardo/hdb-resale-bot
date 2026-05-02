@@ -23,8 +23,17 @@ class PredictRequest(BaseModel):
     def validate_storey(cls, v: str) -> str:
         from app.constants import VALID_STOREY_RANGES
         v = v.strip().upper()
+        v = re.sub(r"\s*-\s*", " TO ", v)
+        v = re.sub(r"\s+", " ", v).strip()
         if v in VALID_STOREY_RANGES:
             return v
+        # LLMs often emit "7 TO 9" instead of zero-padded canonical bands
+        m = re.match(r"^(\d{1,2})\s+TO\s+(\d{1,2})$", v)
+        if m:
+            low, high = int(m.group(1)), int(m.group(2))
+            padded = f"{low:02d} TO {high:02d}"
+            if padded in VALID_STOREY_RANGES:
+                return padded
         # Snap a bare floor number to the nearest valid band
         if re.match(r"^\d+$", v):
             floor = int(v)

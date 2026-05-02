@@ -12,7 +12,14 @@ Leakage controls:
   - split_data() is called on raw data before any statistics are fit
   - mall_dist_median is computed from train only, then applied to val/test
   - KDTree spatial encoding uses a per-month past-only tree for training rows;
-    val/test rows query the full training tree (all 2017-2024 data precedes them)
+    val/test rows query the full training tree (train years strictly before val/test)
+
+Data split (option 1): train 2020–2024, val 2025, test 2026 — latest market year in train before forward val/test.
+
+Macro interactions (option 3): after official HDB RPI join, adds rpi_x_year, rpi_x_tranc_period,
+rpi_x_floor_area_sqm (shared via inference_features.add_macro_interaction_features).
+
+Rows outside train/val/test years are excluded from modelling splits (logged).
 """
 
 import json
@@ -37,6 +44,7 @@ if str(_BACKEND_DIR) not in sys.path:
 
 from app.inference_features import (  # noqa: E402
     SPATIAL_FEATS,
+    add_macro_interaction_features,
     add_official_rpi,
     build_spatial_bundle_dict,
     compute_spatial_features,
@@ -57,6 +65,13 @@ EXPERIMENT_NAME = "HDB Resale Telegram Bot"
 MODEL_VERSION   = "catboost-v2"
 TARGET          = "log_resale_price"
 RANDOM_SEED     = 42
+
+# Time-based splits (forward-chronological)
+TRAIN_YEAR_START = 2020
+TRAIN_YEAR_END   = 2024
+VAL_YEAR         = 2025
+TEST_YEAR_START  = 2026
+TEST_YEAR_END    = 2026  # single held-out year; bump TEST_YEAR_END when adding future tests
 
 # ── CatBoost hyperparameters (Optuna / manual tuned) ────────────────────────────
 DEPTH                 = 4
@@ -117,10 +132,30 @@ CAT_FEATURES = [
 
 
 def split_data(df: pd.DataFrame):
-    train = df[(df["Tranc_Year"] >= 2017) & (df["Tranc_Year"] <= 2024)].reset_index(drop=True)
-    val   = df[df["Tranc_Year"] == 2025].reset_index(drop=True)
-    test  = df[df["Tranc_Year"] >= 2026].reset_index(drop=True)
-    logger.info(f"Split — train: {len(train):,} | val: {len(val):,} | test: {len(test):,}")
+    train = df[
+        (df["Tranc_Year"] >= TRAIN_YEAR_START) & (df["Tranc_Year"] <= TRAIN_YEAR_END)
+    ].reset_index(drop=True)
+    val = df[df["Tranc_Year"] == VAL_YEAR].reset_index(drop=True)
+    test = df[
+        (df["Tranc_Year"] >= TEST_YEAR_START) & (df["Tranc_Year"] <= TEST_YEAR_END)
+    ].reset_index(drop=True)
+    used = len(train) + len(val) + len(test)
+    if used < len(df):
+        logger.info(
+            "Excluded from splits (outside train/val/test years): %s rows",
+            f"{len(df) - used:,}",
+        )
+    logger.info(
+        "Split — train %s–%s: %s | val %s: %s | test %s–%s: %s",
+        TRAIN_YEAR_START,
+        TRAIN_YEAR_END,
+        f"{len(train):,}",
+        VAL_YEAR,
+        f"{len(val):,}",
+        TEST_YEAR_START,
+        TEST_YEAR_END,
+        f"{len(test):,}",
+    )
     return train, val, test
 
 
@@ -184,8 +219,11 @@ def main():
     train_df = add_official_rpi(train_df, RPI_PATH)
     val_df   = add_official_rpi(val_df, RPI_PATH)
     test_df  = add_official_rpi(test_df, RPI_PATH)
+    train_df = add_macro_interaction_features(train_df)
+    val_df   = add_macro_interaction_features(val_df)
+    test_df  = add_macro_interaction_features(test_df)
     t_rpi_join_s = time.perf_counter() - t0
-    logger.info(f"RPI join done in {t_rpi_join_s:.2f}s")
+    logger.info(f"RPI join + macro interaction features done in {t_rpi_join_s:.2f}s")
 
     spatial_path = LOCAL_ARTIFACTS / "spatial_inference.pkl"
     bundle = build_spatial_bundle_dict(train_df)
@@ -233,14 +271,19 @@ def main():
             "version":      MODEL_VERSION,
             "loss":         "MAE",
             "target":       TARGET,
-            "hyperparams":  "tuned_mae_optuna_rolling_medseed",
+            "hyperparams":  "tuned_mae_log_optuna_rolling_medseed",
             "spatial_enc":  "kdtree_temporal_train_full_tree_valtest",
             "hdb_rpi":      "official_lag1q",
-            "val_split":    "2025_full_year",
-            "test_split":   "2026",
+            "val_split":    str(VAL_YEAR),
+            "test_split":   f"{TEST_YEAR_START}-{TEST_YEAR_END}",
             "data_source":  DATA_PATH.name,
         })
         mlflow.log_params({
+            "train_year_start": TRAIN_YEAR_START,
+            "train_year_end":   TRAIN_YEAR_END,
+            "val_year":         VAL_YEAR,
+            "test_year_start":  TEST_YEAR_START,
+            "test_year_end":    TEST_YEAR_END,
             "n_train":          len(X_train),
             "n_val":            len(X_val),
             "n_test":           len(X_test),
@@ -321,6 +364,14 @@ def main():
         metrics_out = {
             "trained_at":       datetime.now(timezone.utc).isoformat(),
             "model":            MODEL_VERSION,
+            "split": {
+                "train_years": [TRAIN_YEAR_START, TRAIN_YEAR_END],
+                "val_year":    VAL_YEAR,
+                "test_years":  [TEST_YEAR_START, TEST_YEAR_END],
+                "n_train":     len(X_train),
+                "n_val":       len(X_val),
+                "n_test":      len(X_test),
+            },
             "catboost_hparams": {
                 "loss_function": "MAE",
                 "eval_metric": "MAE",

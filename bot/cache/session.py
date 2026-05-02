@@ -10,6 +10,32 @@ DEFAULT_PARAMS = {
 
 REQUIRED_PARAMS = {"town", "block", "storey_range", "floor_area_sqm"}
 
+# Gemini sometimes uses alternate keys — map into our schema before /predict.
+_PARAM_ALIASES = {"floor_area": "floor_area_sqm", "sqm": "floor_area_sqm"}
+
+
+def _coerce_merged_value(key: str, val):
+    """Best-effort types for backend PredictRequest (avoids 422 from bad LLM JSON)."""
+    if val is None:
+        return None
+    if key == "floor_area_sqm":
+        if isinstance(val, bool):
+            return None
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, str):
+            try:
+                return float(val.replace(",", "").strip())
+            except ValueError:
+                return None
+        return None
+    if key in ("town", "block", "storey_range"):
+        if isinstance(val, str):
+            s = val.strip()
+            return s if s else None
+        return str(val).strip() if val is not None else None
+    return val
+
 
 class SessionCache:
     """
@@ -50,12 +76,29 @@ class SessionCache:
         with self._lock:
             state = self._cache.setdefault(chat_id, self._default_state())
             for key, val in new_params.items():
-                if val is not None and key in state["collected_params"]:
-                    state["collected_params"][key] = val
+                key = _PARAM_ALIASES.get(key, key)
+                if key not in state["collected_params"]:
+                    continue
+                coerced = _coerce_merged_value(key, val)
+                if coerced is not None:
+                    state["collected_params"][key] = coerced
 
     def is_complete(self, chat_id: int) -> bool:
-        """True when all required params are collected."""
+        """True when all required params are present and satisfy backend validation."""
         with self._lock:
             state = self._cache.get(chat_id, self._default_state())
             params = state["collected_params"]
-            return all(params.get(k) is not None for k in REQUIRED_PARAMS)
+            for k in REQUIRED_PARAMS:
+                v = params.get(k)
+                if v is None:
+                    return False
+                if k in ("town", "block", "storey_range"):
+                    if not isinstance(v, str) or not v.strip():
+                        return False
+                if k == "floor_area_sqm":
+                    if not isinstance(v, (int, float)):
+                        return False
+                    fv = float(v)
+                    if not (20.0 <= fv <= 300.0):
+                        return False
+            return True

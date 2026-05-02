@@ -229,6 +229,20 @@ def add_official_rpi(df: pd.DataFrame, rpi_path: Path) -> pd.DataFrame:
     return df
 
 
+def add_macro_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Richer macro/time signal for forward extrapolation (after add_official_rpi).
+
+    Requires: hdb_rpi, Tranc_Year, tranc_period, floor_area_sqm.
+    """
+    df = df.copy()
+    rpi = df["hdb_rpi"].astype(np.float64)
+    df["rpi_x_year"] = rpi * df["Tranc_Year"].astype(np.float64)
+    df["rpi_x_tranc_period"] = rpi * df["tranc_period"].astype(np.float64)
+    df["rpi_x_floor_area_sqm"] = rpi * df["floor_area_sqm"].astype(np.float64)
+    return df
+
+
 def prepare_X(df: pd.DataFrame, feature_cols: list, cat_cols: list) -> pd.DataFrame:
     X = df[feature_cols].copy()
     for col in cat_cols:

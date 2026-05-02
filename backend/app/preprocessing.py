@@ -17,6 +17,7 @@ from catboost import Pool
 from app.constants import DEFAULT_FLAT_MODEL, DEFAULT_FLAT_TYPE
 from app.inference_features import (
     SPATIAL_FEATS,
+    add_macro_interaction_features,
     add_official_rpi,
     encode_queries_spatial,
     engineer_features,
@@ -189,6 +190,8 @@ def build_inference_pool(req: PredictRequest) -> Pool:
         df["hdb_rpi"] = 180.0
     else:
         df = add_official_rpi(df, _RPI_PATH)
+
+    df = add_macro_interaction_features(df)
 
     qc = query_coords_from_lat_lon(lat, lon)
     spat = encode_queries_spatial(qc, bundle_sp)

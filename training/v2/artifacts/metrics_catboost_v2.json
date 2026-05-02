@@ -1,7 +1,23 @@
 {
-  "trained_at": "2026-05-02T13:31:03.428526+00:00",
+  "trained_at": "2026-05-02T14:18:32.374636+00:00",
   "model": "catboost-v2",
+  "split": {
+    "train_years": [
+      2020,
+      2024
+    ],
+    "val_year": 2025,
+    "test_years": [
+      2026,
+      2026
+    ],
+    "n_train": 42996,
+    "n_val": 8276,
+    "n_test": 2389
+  },
   "catboost_hparams": {
+    "loss_function": "MAE",
+    "eval_metric": "MAE",
     "depth": 4,
     "learning_rate": 0.14685,
     "l2_leaf_reg": 2.24883,
@@ -12,29 +28,29 @@
     "random_seed": 42,
     "early_stopping_rounds": 100
   },
-  "best_iteration": 999,
+  "best_iteration": 993,
   "train": {
-    "MAE": 18641.948726360235,
-    "RMSE": 25528.94597923457,
-    "MAPE": 3.7807216084970134,
-    "R2": 0.9779770595579543,
-    "log_RMSE": 0.04975144628344998
+    "MAE": 19091.576415424468,
+    "RMSE": 27548.52133005175,
+    "MAPE": 3.594094866736845,
+    "R2": 0.974561695331188,
+    "log_RMSE": 0.04956080271256317
   },
   "validation": {
-    "MAE": 29438.830503561254,
-    "RMSE": 41148.41934181254,
-    "MAPE": 4.397717001439308,
-    "R2": 0.9566987772974743,
-    "log_RMSE": 0.0578015253182567
+    "MAE": 28989.555477166436,
+    "RMSE": 43715.55380204412,
+    "MAPE": 4.262970508765166,
+    "R2": 0.9511273582732834,
+    "log_RMSE": 0.058321558195679274
   },
   "test": {
-    "MAE": 33434.44544726197,
-    "RMSE": 47832.80136987227,
-    "MAPE": 4.904731463413485,
-    "R2": 0.9462988242627635,
-    "log_RMSE": 0.06495879731649411
+    "MAE": 31816.396228474332,
+    "RMSE": 48808.71775245448,
+    "MAPE": 4.66829999927553,
+    "R2": 0.944085176494082,
+    "log_RMSE": 0.06504615020253536
   },
-  "n_features": 46,
+  "n_features": 49,
   "features": [
     "Tranc_Year",
     "town",
@@ -78,6 +94,9 @@
     "storey_x_lease_rem",
     "year_completed_x_floor_area",
     "hdb_rpi",
+    "rpi_x_year",
+    "rpi_x_tranc_period",
+    "rpi_x_floor_area_sqm",
     "spatial_500m_te",
     "spatial_2000m_te",
     "spatial_500m_psm",
@@ -97,5 +116,5 @@
     "spatial_500m_psm",
     "spatial_2000m_psm"
   ],
-  "mall_dist_median": 570.4465193289669
+  "mall_dist_median": 568.5053377585285
 }
