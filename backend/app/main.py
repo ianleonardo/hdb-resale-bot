@@ -8,28 +8,35 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from google.cloud import storage
 
-from app.model_loader import load_model, load_comp_lookup
-from app.preprocessing import build_inference_dataframe
+from app.model_loader import (
+    load_block_lookup,
+    load_inference_metrics,
+    load_model,
+    load_spatial_bundle,
+)
+from app.preprocessing import build_inference_pool
 from app.schemas import PredictRequest, PredictResponse
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="HDB Resale Price Estimator", version="4.0.0")
+app = FastAPI(title="HDB Resale Price Estimator", version="5.0.0")
 GCS_BUCKET    = os.environ.get("GCS_BUCKET", "hdb-resale-artifacts")
-MODEL_VERSION = os.environ.get("MODEL_VERSION", "4.0.0")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "catboost-v2")
 
 
 @app.on_event("startup")
 async def startup():
-    """Warm up model and comp lookup in background threads."""
+    """Warm model + v2 inference artifacts (metrics, spatial bundle, block lookup)."""
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, load_model)
-        await loop.run_in_executor(None, load_comp_lookup)
-        logger.info("CatBoost model and comp lookup loaded from GCS ✅")
+        await loop.run_in_executor(None, load_inference_metrics)
+        await loop.run_in_executor(None, load_spatial_bundle)
+        await loop.run_in_executor(None, load_block_lookup)
+        logger.info("CatBoost v2 artifacts warmed ✅")
     except Exception as exc:
-        logger.warning(f"Artifacts not loaded at startup (will retry on first request): {exc}")
+        logger.warning("Artifacts not loaded at startup (will retry on first request): %s", exc)
 
 
 @app.get("/health")
@@ -50,14 +57,16 @@ async def meta():
 @app.post("/predict", response_model=PredictResponse)
 async def predict(req: PredictRequest):
     try:
-        model       = load_model()
-        comp_lookup = load_comp_lookup()
+        model = load_model()
+        pool  = build_inference_pool(req)
     except Exception as exc:
-        logger.error(f"Artifacts unavailable: {exc}")
-        raise HTTPException(status_code=503, detail="Model not yet available. Run training pipeline first.")
+        logger.error("Prediction pipeline failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Model or inference artifacts unavailable. Run training pipeline and upload v2 artifacts.",
+        ) from exc
 
-    df     = build_inference_dataframe(req, comp_lookup)
-    price  = float(np.expm1(model.predict(df)[0]))
+    price  = float(np.expm1(model.predict(pool)[0]))
     margin = price * 0.05
 
     result = PredictResponse(

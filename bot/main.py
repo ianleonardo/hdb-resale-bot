@@ -69,8 +69,7 @@ async def cmd_start(update: Update, context) -> None:
     session_cache.clear(update.effective_chat.id)
     await update.message.reply_text(
         "Eh hello! 👋 I'm Uncle HDB — your kakak for checking HDB resale prices in SG!\n\n"
-        "Just tell me about the flat lor — which area, what type, high or low floor, liddat. "
-        "I'll figure out the rest.\n\n"
+        "Just need four things lor: town, block number, roughly which storey band, and floor area (sqm).\n\n"
         "So, what flat you want to check ah? 🏠",
         parse_mode="Markdown",
     )
@@ -88,7 +87,7 @@ async def cmd_help(update: Update, context) -> None:
     await update.message.reply_text(
         "🏠 *Uncle HDB Help*\n\n"
         "Just chat with me about the HDB flat you want to check!\n"
-        "Tell me the town, flat type, model, floor, area, lease, street and block.\n"
+        "Tell me the town, block, storey band, and floor area (sqm).\n"
         "Can give all at once or one by one, up to you lor.\n\n"
         "Commands:\n"
         "/estimate — Start a new price check\n"

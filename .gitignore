@@ -210,3 +210,5 @@ __marimo__/
 .DS_Store
 
 training/catboost_info/
+data/raw/
+data/cache/

@@ -21,7 +21,7 @@ jobs:
         run: gcloud auth configure-docker --quiet
       - name: Build and push backend image
         run: |
-          docker build -t gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} ./backend
+          docker build -f backend/Dockerfile -t gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} .
           docker push gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }}
       - name: Deploy backend to Cloud Run
         run: |
@@ -29,7 +29,7 @@ jobs:
             --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
             --region $REGION \
             --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com \
-            --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=3.0.0,LOG_LEVEL=INFO \
+            --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=catboost-v2,LOG_LEVEL=INFO \
             --quiet
 
   deploy-bot:

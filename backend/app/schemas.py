@@ -1,20 +1,22 @@
 import re
 from typing import Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 
 class PredictRequest(BaseModel):
-    # Required
-    town:              str
-    flat_type:         str
-    flat_model:        str
-    storey_range:      str           # "07 TO 09"
-    floor_area_sqm:    float = Field(ge=20.0, le=300.0)
+    """Minimal bot payload: town + block + storey + floor area.
+    Flat type/model and lease default server-side when omitted."""
 
-    # Optional — model uses defaults when absent
+    town:           str
+    block:          str
+    storey_range:   str    # "07 TO 09"
+    floor_area_sqm: float = Field(ge=20.0, le=300.0)
+
+    flat_type:             Optional[str]   = None
+    flat_model:            Optional[str]   = None
     remaining_lease_years: Optional[float] = Field(default=None, ge=0.0, le=99.0)
     street_name:           Optional[str]   = None
-    block:                 Optional[str]   = None
 
     @field_validator("storey_range")
     @classmethod
@@ -32,10 +34,29 @@ class PredictRequest(BaseModel):
                 return snapped
         raise ValueError(f"storey_range must be one of {VALID_STOREY_RANGES}")
 
-    @field_validator("town", "flat_type", "flat_model")
+    @field_validator("town", "block")
     @classmethod
-    def uppercase_str(cls, v: str) -> str:
-        return v.strip().upper()
+    def uppercase_required(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v:
+            raise ValueError("must not be empty")
+        return v
+
+    @field_validator("flat_type", "flat_model")
+    @classmethod
+    def strip_optional_flat(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        s = v.strip()
+        return s if s else None
+
+    @field_validator("street_name")
+    @classmethod
+    def uppercase_optional_street(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip().upper()
+        return v if v else None
 
 
 class PredictResponse(BaseModel):

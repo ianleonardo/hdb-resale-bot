@@ -2,12 +2,13 @@ import threading
 from cachetools import TTLCache
 
 DEFAULT_PARAMS = {
-    "town": None, "flat_type": None, "flat_model": None,
-    "storey_range": None, "floor_area_sqm": None,
-    "remaining_lease_years": None, "street_name": None, "block": None,
+    "town": None,
+    "block": None,
+    "storey_range": None,
+    "floor_area_sqm": None,
 }
 
-REQUIRED_PARAMS = {"town", "flat_type", "flat_model", "storey_range", "floor_area_sqm"}
+REQUIRED_PARAMS = {"town", "block", "storey_range", "floor_area_sqm"}
 
 
 class SessionCache:
@@ -53,7 +54,7 @@ class SessionCache:
                     state["collected_params"][key] = val
 
     def is_complete(self, chat_id: int) -> bool:
-        """True when all 5 required params are collected (optional params may still be None)."""
+        """True when all required params are collected."""
         with self._lock:
             state = self._cache.get(chat_id, self._default_state())
             params = state["collected_params"]

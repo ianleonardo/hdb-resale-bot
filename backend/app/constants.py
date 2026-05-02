@@ -19,6 +19,10 @@ VALID_FLAT_TYPES = [
     "EXECUTIVE", "MULTI-GENERATION",
 ]
 
+# Used when callers omit flat_type / flat_model (bot collects town + block + storey + area only).
+DEFAULT_FLAT_TYPE = "4 ROOM"
+DEFAULT_FLAT_MODEL = "MODEL A"
+
 VALID_FLAT_MODELS = [
     "2-ROOM", "3GEN", "ADJOINED FLAT", "APARTMENT", "DBSS",
     "EXECUTIVE MAISONETTE", "IMPROVED", "IMPROVED MAISONETTE",

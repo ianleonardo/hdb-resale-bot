@@ -92,7 +92,7 @@ async def format_result_singlish(prediction: dict, params: dict) -> str:
     prompt = f"""
 You are Uncle HDB. A user just got their HDB resale price estimate.
 Write a warm, natural Singlish reply (5–8 lines) that:
-- Recaps the key flat details (town, flat type, storey, floor area)
+- Recaps the key flat details (town, block, storey band, floor area)
 - Highlights the predicted price in bold Markdown (*SGD X*)
 - Mentions the low–high range casually
 - Ends with a friendly closing line

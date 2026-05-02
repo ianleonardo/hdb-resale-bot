@@ -1,8 +1,11 @@
+# Local dev: use Python 3.12 + pip wheels when possible — Py 3.13 may trigger a CatBoost source build (Rust).
 fastapi==0.115.5
 uvicorn==0.32.1
 pydantic==2.9.2
 numpy==1.26.4
 pandas==2.2.3
+scipy==1.14.1
+pyarrow==18.1.0
 catboost==1.2.7
 joblib==1.4.2
 google-cloud-storage==2.18.2
