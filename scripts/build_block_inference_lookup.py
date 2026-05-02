@@ -1,16 +1,23 @@
 """
 Build block_lookup.parquet for backend v2 inference.
 
-Joins data/raw/hdb_property_info_geocoded.csv with resale-derived (town, block) aggregates
-from data/hdb_resale_complete.csv. One row per (town, block); single read at backend startup.
+Joins data/raw/hdb_property_info_geocoded.csv with resale-derived aggregates from
+data/hdb_resale_complete.csv. One row per (town, block, street_name) so inference can
+resolve optional street hints via fuzzy match; backend picks primary row when street omitted.
 
 Usage:
   python scripts/build_block_inference_lookup.py
   # writes training/v2/artifacts/block_lookup.parquet (and copies to backend/artifacts if dir exists)
+  # then uploads to gs://$GCS_BUCKET/$BLOCK_LOOKUP_BLOB (same defaults as backend model_loader)
+
+  SKIP_BLOCK_LOOKUP_GCS_UPLOAD=1 python scripts/build_block_inference_lookup.py   # local only
+  python scripts/build_block_inference_lookup.py --no-upload
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +28,18 @@ RAW_PROP = BASE / "data" / "raw" / "hdb_property_info_geocoded.csv"
 RESALE_PATH = BASE / "data" / "hdb_resale_complete.csv"
 OUT_DIR = BASE / "training" / "v2" / "artifacts"
 OUT_PATH = OUT_DIR / "block_lookup.parquet"
+
+
+def _upload_block_lookup_to_gcs(local_path: Path) -> None:
+    """Upload parquet to GCS — aligns with backend BLOCK_LOOKUP_BLOB / GCS_BUCKET env vars."""
+    from google.cloud import storage
+
+    bucket_name = os.environ.get("GCS_BUCKET", "hdb-resale-artifacts").strip()
+    blob_path = os.environ.get("BLOCK_LOOKUP_BLOB", "models/block_lookup.parquet").strip()
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    bucket.blob(blob_path).upload_from_filename(str(local_path))
+    print(f"Uploaded gs://{bucket_name}/{blob_path}")
 
 
 def _mode_first(s: pd.Series):
@@ -38,7 +57,7 @@ def _norm_block_street(df: pd.DataFrame, blk: str, st: str) -> pd.DataFrame:
     return out[(out[blk] != "") & (out[st] != "")]
 
 
-def main() -> None:
+def main(*, skip_gcs_upload: bool = False) -> None:
     if not RAW_PROP.exists():
         raise FileNotFoundError(f"Missing {RAW_PROP} (run scripts/2_download_hd_property_info.py)")
     if not RESALE_PATH.exists():
@@ -73,7 +92,7 @@ def main() -> None:
             prop[c] = pd.to_numeric(prop[c], errors="coerce")
 
     prop = prop.sort_values("total_dwelling_units", ascending=False, na_position="last")
-    prop_agg = prop.groupby(["town", "block"], as_index=False).first()
+    prop_gb = prop.groupby(["town", "block", "street_name"], as_index=False).first()
 
     resale["town"] = resale["town"].astype(str).str.strip().str.upper()
 
@@ -95,10 +114,10 @@ def main() -> None:
         "Latitude",
         "Longitude",
     ]
+    # street_name is the groupby key — do not mode-aggregate it
     mode_cols = [
         "flat_type",
         "flat_model",
-        "street_name",
         "mrt_name",
         "pri_sch_name",
         "sec_sch_name",
@@ -109,9 +128,9 @@ def main() -> None:
         if c in resale.columns:
             agg_kw[c] = _mode_first
 
-    resale_gb = resale.groupby(["town", "block"]).agg(agg_kw).reset_index()
+    resale_gb = resale.groupby(["town", "block", "street_name"]).agg(agg_kw).reset_index()
 
-    merged = resale_gb.merge(prop_agg, on=["town", "block"], how="outer", suffixes=("", "_prop"))
+    merged = resale_gb.merge(prop_gb, on=["town", "block", "street_name"], how="outer", suffixes=("", "_prop"))
 
     # Prefer resale aggregates; fill structure fields from property file
     prop_suffix_cols = [c for c in merged.columns if c.endswith("_prop")]
@@ -125,8 +144,10 @@ def main() -> None:
 
     merged["town"] = merged["town"].astype(str).str.strip().str.upper()
     merged["block"] = merged["block"].astype(str).str.strip().str.upper()
+    merged["street_name"] = merged["street_name"].fillna("").astype(str).str.strip().str.upper()
+    merged = merged[merged["street_name"].str.len() > 0].reset_index(drop=True)
 
-    merged = merged.drop_duplicates(["town", "block"]).reset_index(drop=True)
+    merged = merged.drop_duplicates(["town", "block", "street_name"]).reset_index(drop=True)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     merged.to_parquet(OUT_PATH, index=False)
@@ -139,6 +160,24 @@ def main() -> None:
         merged.to_parquet(backend_out, index=False)
         print(f"Copied -> {backend_out}")
 
+    env_skip = os.environ.get("SKIP_BLOCK_LOOKUP_GCS_UPLOAD", "").lower() in ("1", "true", "yes")
+    if skip_gcs_upload or env_skip:
+        print("GCS upload skipped (--no-upload or SKIP_BLOCK_LOOKUP_GCS_UPLOAD).")
+        return
+    try:
+        _upload_block_lookup_to_gcs(OUT_PATH)
+    except ImportError:
+        print("Warning: google-cloud-storage not installed — install backend deps or use --no-upload.")
+    except Exception as exc:
+        print(f"Warning: GCS upload failed ({exc}). Local parquet files were written.")
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Build block_lookup.parquet for backend v2 inference.")
+    parser.add_argument(
+        "--no-upload",
+        action="store_true",
+        help="Do not upload to GCS after writing local parquet.",
+    )
+    args = parser.parse_args()
+    main(skip_gcs_upload=args.no_upload)

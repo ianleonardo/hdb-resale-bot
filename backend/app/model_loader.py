@@ -104,8 +104,9 @@ def load_block_lookup() -> pd.DataFrame:
         df = pd.read_parquet(buf)
     df["town"] = df["town"].astype(str).str.strip().str.upper()
     df["block"] = df["block"].astype(str).str.strip().str.upper()
-    df = df.drop_duplicates(["town", "block"]).set_index(["town", "block"], verify_integrity=False)
-    logger.info("block_lookup loaded — %s rows ✅", len(df))
+    df["street_name"] = df["street_name"].fillna("").astype(str).str.strip().str.upper()
+    df = df[df["street_name"].str.len() > 0].reset_index(drop=True)
+    logger.info("block_lookup loaded — %s rows (town+block+street) ✅", len(df))
     return df
 
 

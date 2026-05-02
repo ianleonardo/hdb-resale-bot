@@ -19,14 +19,15 @@ async def call_predict(params: dict) -> dict:
     token = _get_identity_token(BACKEND_URL)
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(f"{BACKEND_URL}/predict", json=params, headers=headers)
+        payload = {k: v for k, v in params.items() if v is not None}
+        resp = await client.post(f"{BACKEND_URL}/predict", json=payload, headers=headers)
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 422:
                 logger.error(
                     "Backend 422 Unprocessable: body=%s detail=%s",
-                    params,
+                    payload,
                     e.response.text[:2000],
                 )
             raise

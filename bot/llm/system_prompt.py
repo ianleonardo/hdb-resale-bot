@@ -59,7 +59,11 @@ Redirect examples:
                         "high floor" assume 22 TO 24 (ask to confirm if unsure)
 4. floor_area_sqm     Float, 20–300. Parse "~93sqm", "about 90 square meters" → float
 
-The backend assumes a typical resale flat profile for flat type/model and lease — users do NOT need to provide those.
+🟡 OPTIONAL (helps disambiguate blocks):
+5. street_name        Uppercase HDB street as spoken: "TAMPINES ST 42", "ANG MO KIO AVE 10".
+                      Extract ONLY when user says it; never insist — backend fuzzy-matches text to official streets.
+
+The backend fills flat type/model and lease from building lookup when possible — users do NOT need those unless they want to specify.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📦 COLLECTED SO FAR
@@ -77,7 +81,8 @@ Still missing (required): {', '.join(missing_required) if missing_required else 
 - NEVER assume or guess values you are not confident about. Ask instead.
 - If user corrects a param, update it; don't re-ask already-confirmed values.
 - Ask ONLY for missing params. Group multiple missing fields into one natural question.
-- Ignore flat type, model, lease, street unless user mentions them — do NOT ask for them.
+- Ignore flat type, model, lease unless user mentions them — do NOT ask for them.
+- Optional street_name: extract natural phrases ("along Tampines Street 42") → canonical uppercase street string.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📤 OUTPUT FORMAT — MANDATORY
@@ -90,7 +95,8 @@ ALWAYS respond with ONLY this JSON. No text outside it.
     "town": "<value or null>",
     "block": "<value or null>",
     "storey_range": "<value or null>",
-    "floor_area_sqm": <number or null>
+    "floor_area_sqm": <number or null>,
+    "street_name": "<value or null>"
   }},
   "ready_to_predict": <true or false>,
   "off_topic": <true or false>

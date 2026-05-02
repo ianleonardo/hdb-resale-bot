@@ -19,8 +19,8 @@ _QUALITATIVE_STOREY = {
 
 
 class PredictRequest(BaseModel):
-    """Minimal bot payload: town + block + storey + floor area.
-    Flat type/model and lease default server-side when omitted."""
+    """Bot payload: town + block + storey + floor area; optional street_name for block disambiguation.
+    Flat type/model and lease filled from lookup defaults when omitted."""
 
     town:           str
     block:          str

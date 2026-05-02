@@ -4,6 +4,7 @@ Build CatBoost Pool rows matching training/v2 feature schema from minimal Predic
 
 from __future__ import annotations
 
+import difflib
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -69,33 +70,86 @@ _FALLBACK_TEMPLATE = {
 }
 
 
-def _lookup_context(town: str, block: str) -> dict:
+def _normalize_street_label(s: object) -> str:
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    t = str(s).strip().upper()
+    if t in ("", "NAN", "NONE"):
+        return ""
+    return " ".join(t.split())
+
+
+def _fuzzy_pick_normalized(query: str, normalized_candidates: list[str], cutoff: float = 0.55) -> str | None:
+    """Return normalized lookup key closest to query (difflib — resilient to typos / spacing)."""
+    q = _normalize_street_label(query)
+    uniq = list(dict.fromkeys([c for c in normalized_candidates if c]))
+    if not uniq:
+        return None
+    if q in uniq:
+        return q
+    m = difflib.get_close_matches(q, uniq, n=1, cutoff=cutoff)
+    return m[0] if m else None
+
+
+def _lookup_row_to_ctx(row: pd.Series) -> dict:
+    out: dict = {}
+    for k, v in row.items():
+        ks = str(k)
+        if ks.startswith("_"):
+            continue
+        if k in ("town", "block"):
+            continue
+        if pd.isna(v):
+            continue
+        if isinstance(v, str):
+            out[k] = v.strip()
+        elif isinstance(v, (bool, np.bool_)):
+            out[k] = bool(v)
+        elif isinstance(v, (np.integer, int)):
+            out[k] = int(v)
+        elif isinstance(v, (np.floating, float)):
+            out[k] = float(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _lookup_context(town: str, block: str, street_hint: str | None = None) -> dict:
+    """Resolve property row: optional street_hint fuzzy-matches among rows sharing town+block."""
     df = load_block_lookup()
-    key = (town.strip().upper(), block.strip().upper())
-    try:
-        row = df.loc[key]
-        if isinstance(row, pd.DataFrame):
-            row = row.iloc[0]
-        d = row.to_dict()
-        out = {}
-        for k, v in d.items():
-            if k in ("town", "block"):
-                continue
-            if pd.isna(v):
-                continue
-            if isinstance(v, str):
-                out[k] = v.strip()
-            elif isinstance(v, (bool, np.bool_)):
-                out[k] = bool(v)
-            elif isinstance(v, (np.integer, int)):
-                out[k] = int(v)
-            elif isinstance(v, (np.floating, float)):
-                out[k] = float(v)
-            else:
-                out[k] = v
-        return out
-    except KeyError:
+    t, b = town.strip().upper(), block.strip().upper()
+    cand = df[(df["town"] == t) & (df["block"] == b)]
+    if cand.empty:
         return {}
+
+    dwell = cand.copy()
+    if "total_dwelling_units" in dwell.columns:
+        dwell["_dw"] = pd.to_numeric(dwell["total_dwelling_units"], errors="coerce").fillna(0)
+        dwell = dwell.sort_values("_dw", ascending=False)
+    dwell["_sn"] = dwell["street_name"].astype(str).map(_normalize_street_label)
+    dwell = dwell[dwell["_sn"].str.len() > 0]
+    if dwell.empty:
+        return {}
+
+    hint = street_hint.strip() if street_hint and str(street_hint).strip() else ""
+    if hint:
+        hit_norm = _fuzzy_pick_normalized(hint, dwell["_sn"].tolist())
+        if hit_norm is not None:
+            row = dwell[dwell["_sn"] == hit_norm].iloc[0]
+            logger.debug("street hint %r matched canonical %s", hint, row["street_name"])
+        else:
+            row = dwell.iloc[0]
+            logger.info(
+                "street hint %r did not match any row for %s blk %s — using primary street %s",
+                hint,
+                t,
+                b,
+                row.get("street_name"),
+            )
+    else:
+        row = dwell.iloc[0]
+
+    return _lookup_row_to_ctx(row)
 
 
 def _mid_storey(storey_range: str) -> float:
@@ -124,14 +178,15 @@ def build_inference_pool(req: PredictRequest) -> Pool:
     ty, tm = now.year, now.month
 
     ctx = dict(_FALLBACK_TEMPLATE)
-    ctx.update(_lookup_context(req.town, req.block))
+    ctx.update(_lookup_context(req.town, req.block, req.street_name))
 
     if req.flat_type:
         ctx["flat_type"] = req.flat_type
     if req.flat_model:
         ctx["flat_model"] = req.flat_model
-    if req.street_name:
-        ctx["street_name"] = req.street_name
+    # Lookup supplies canonical street_name; only override if lookup missed entirely.
+    if req.street_name and ctx.get("street_name") in (None, "", "UNKNOWN"):
+        ctx["street_name"] = req.street_name.strip().upper()
 
     ms = _mid_storey(req.storey_range)
 

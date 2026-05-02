@@ -6,12 +6,18 @@ DEFAULT_PARAMS = {
     "block": None,
     "storey_range": None,
     "floor_area_sqm": None,
+    "street_name": None,
 }
 
 REQUIRED_PARAMS = {"town", "block", "storey_range", "floor_area_sqm"}
 
 # Gemini sometimes uses alternate keys — map into our schema before /predict.
-_PARAM_ALIASES = {"floor_area": "floor_area_sqm", "sqm": "floor_area_sqm"}
+_PARAM_ALIASES = {
+    "floor_area": "floor_area_sqm",
+    "sqm": "floor_area_sqm",
+    "street": "street_name",
+    "road": "street_name",
+}
 
 
 def _coerce_merged_value(key: str, val):
@@ -29,7 +35,7 @@ def _coerce_merged_value(key: str, val):
             except ValueError:
                 return None
         return None
-    if key in ("town", "block", "storey_range"):
+    if key in ("town", "block", "storey_range", "street_name"):
         if isinstance(val, str):
             s = val.strip()
             return s if s else None
