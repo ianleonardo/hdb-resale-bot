@@ -82,7 +82,8 @@ async def predict(req: PredictRequest):
             detail="Model or inference artifacts unavailable. Run training pipeline and upload v2 artifacts.",
         ) from exc
 
-    price  = float(np.expm1(model.predict(pool)[0]))
+    # Conservative haircut vs raw model output (business calibration).
+    price = float(np.expm1(model.predict(pool)[0])) * 0.95
     margin = price * 0.05
 
     result = PredictResponse(
