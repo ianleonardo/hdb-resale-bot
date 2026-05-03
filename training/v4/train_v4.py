@@ -283,6 +283,7 @@ def main():
             eval_metric="MAE",
             early_stopping_rounds=100,
             random_seed=RANDOM_SEED,
+            thread_count=1,
             verbose=500,
             depth=DEPTH,
             learning_rate=LEARNING_RATE,

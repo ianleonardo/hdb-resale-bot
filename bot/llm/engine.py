@@ -83,6 +83,34 @@ def _parse_response(raw: str) -> dict:
         }
 
 
+def format_prediction_fallback(prediction: dict, params: dict) -> str:
+    """Plain Singlish summary if Gemini formatting fails."""
+    price = prediction.get("predicted_price")
+    pr = prediction.get("price_range") or {}
+    low, high = pr.get("low"), pr.get("high")
+    town = params.get("town") or "?"
+    block = params.get("block") or "?"
+    storey = params.get("storey_range") or "?"
+    sqm = params.get("floor_area_sqm") or "?"
+
+    def _fmt_money(x) -> str:
+        if isinstance(x, (int, float)):
+            return f"{float(x):,.0f}"
+        return str(x)
+
+    mid = _fmt_money(price) if price is not None else "N/A"
+    lo = _fmt_money(low) if low is not None else "N/A"
+    hi = _fmt_money(high) if high is not None else "N/A"
+
+    return (
+        f"Ok lor, here's the rough chop:\n\n"
+        f"{town} blk {block}, {storey}, ~{sqm} sqm.\n\n"
+        f"*Estimate around SGD {mid}*\n"
+        f"Ballpark band about SGD {lo} – {hi} lah.\n\n"
+        "Hope this helps ah!"
+    )
+
+
 async def format_result_singlish(prediction: dict, params: dict) -> str:
     """Use Gemini to craft a warm Singlish result message."""
     model = genai.GenerativeModel(
@@ -102,5 +130,11 @@ Prediction: {json.dumps(prediction, indent=2)}
 
 Return ONLY the plain Singlish text (Markdown ok). No JSON. No preamble.
 """
-    resp = model.generate_content(prompt)
-    return resp.text.strip()
+    try:
+        resp = model.generate_content(prompt)
+        text = (getattr(resp, "text", None) or "").strip()
+        if text:
+            return text
+    except Exception as e:
+        logger.warning("format_result_singlish Gemini failed: %s", e)
+    return format_prediction_fallback(prediction, params)

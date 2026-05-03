@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from llm.engine import process_message, format_result_singlish
@@ -21,6 +22,15 @@ session_cache = SessionCache(
 )
 
 ptb_app: Application = None
+
+
+async def _reply_markdown_safe(message, text: str) -> None:
+    """Gemini sometimes returns characters that break Telegram Markdown; fall back to plain text."""
+    try:
+        await message.reply_text(text, parse_mode="Markdown")
+    except BadRequest as exc:
+        logger.warning("Markdown reply failed (%s); sending plain text", exc)
+        await message.reply_text(text)
 
 
 # ── Telegram handlers ────────────────────────────────────────────────────────
@@ -44,9 +54,10 @@ async def handle_message(update: Update, context) -> None:
     if llm_result.get("extracted_params"):
         session_cache.merge_params(chat_id, llm_result["extracted_params"])
 
-    await update.message.reply_text(llm_result["reply"], parse_mode="Markdown")
+    await _reply_markdown_safe(update.message, llm_result["reply"])
 
-    if llm_result.get("ready_to_predict") and session_cache.is_complete(chat_id):
+    # Gemini often omits ready_to_predict even when params are complete; trust session completeness.
+    if session_cache.is_complete(chat_id) and not llm_result.get("off_topic"):
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
         updated_state = session_cache.get(chat_id)
         try:
@@ -54,7 +65,7 @@ async def handle_message(update: Update, context) -> None:
             singlish_reply = await format_result_singlish(
                 prediction, updated_state["collected_params"]
             )
-            await update.message.reply_text(singlish_reply, parse_mode="Markdown")
+            await _reply_markdown_safe(update.message, singlish_reply)
         except Exception as exc:
             logger.error(f"Prediction call failed: {exc}")
             await update.message.reply_text(
