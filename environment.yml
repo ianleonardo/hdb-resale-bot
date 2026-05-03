@@ -1,0 +1,22 @@
+# Conda env used by training notebooks ("hdb-ml-env").
+# Creates one env with ML pins aligned to backend + bot HTTP/deps overlap.
+#
+#   conda env create -f environment.yml
+#   conda activate hdb-ml-env
+#
+# Refresh after edits:
+#   conda env update -f environment.yml --prune
+#
+name: hdb-ml-env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - jupyterlab
+  - ipykernel
+  - pip:
+      # Order: training (base ML), backend (FastAPI stack + inference parity), bot (Telegram).
+      - -r training/requirements.txt
+      - -r backend/requirements.txt
+      - -r bot/requirements.txt
