@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-05-02T16:01:16.585755+00:00",
+  "trained_at": "2026-05-02T17:16:14.866709+00:00",
   "model": "catboost-v2",
   "split": {
     "train_years": [

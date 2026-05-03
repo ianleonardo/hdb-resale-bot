@@ -29,7 +29,7 @@ jobs:
             --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
             --region $REGION \
             --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com \
-            --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=catboost-v2,LOG_LEVEL=INFO \
+            --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=catboost-arima-v4,MODEL_BLOB=models/model_v4.cbm,METRICS_BLOB=models/metrics_v4.json,SPATIAL_BLOB=models/spatial_inference.pkl,ARIMA_BLOB=models/arima_bundle_v4.pkl,LOG_LEVEL=INFO \
             --quiet
 
   deploy-bot:

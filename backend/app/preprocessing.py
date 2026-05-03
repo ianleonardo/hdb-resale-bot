@@ -25,6 +25,7 @@ from app.inference_features import (
     query_coords_from_lat_lon,
 )
 from app.model_loader import (
+    load_arima_bundle,
     load_block_lookup,
     load_inference_metrics,
     load_rpi_quarters_df,
@@ -300,6 +301,13 @@ def build_inference_pool(req: PredictRequest) -> Pool:
     spat = encode_queries_spatial(qc, bundle_sp)
     for feat in SPATIAL_FEATS:
         df[feat] = spat[feat][0]
+
+    arima_names = metrics.get("arima_features") or []
+    if arima_names:
+        bundle_arima = load_arima_bundle()
+        af = bundle_arima.get_arima_features(df)
+        for name in arima_names:
+            df[name] = af[name]
 
     X = prepare_X(df, feature_cols, cat_cols)
     return Pool(X, cat_features=cat_cols)

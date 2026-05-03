@@ -208,7 +208,9 @@ __marimo__/
 
 *.csv
 .DS_Store
+.claude/
 
-training/catboost_info/
+catboost_info/
 data/raw/
 data/cache/
+artifacts/

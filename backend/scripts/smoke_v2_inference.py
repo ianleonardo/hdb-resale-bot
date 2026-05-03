@@ -24,6 +24,9 @@ os.environ.setdefault(
     "BACKEND_ARTIFACT_DIR",
     str(REPO_ROOT / "training" / "v2" / "artifacts"),
 )
+# Align blob basenames with files in v2 artifact dir (defaults in model_loader target v4).
+os.environ.setdefault("MODEL_BLOB", "models/model_catboost_v2.cbm")
+os.environ.setdefault("METRICS_BLOB", "models/metrics_catboost_v2.json")
 os.environ.setdefault("HDB_RPI_PATH", str(REPO_ROOT / "data" / "hdb_rpi.csv"))
 
 

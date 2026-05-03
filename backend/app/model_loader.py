@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import sys
 import tempfile
 from functools import lru_cache
 from pathlib import Path
@@ -16,11 +17,28 @@ logger = logging.getLogger(__name__)
 GCS_BUCKET = os.environ.get("GCS_BUCKET", "hdb-resale-artifacts")
 
 # Blob paths under bucket (single prefix models/)
-MODEL_BLOB           = os.environ.get("MODEL_BLOB", "models/model_catboost_v2.cbm")
-METRICS_BLOB         = os.environ.get("METRICS_BLOB", "models/metrics_catboost_v2.json")
+MODEL_BLOB           = os.environ.get("MODEL_BLOB", "models/model_v4.cbm")
+METRICS_BLOB         = os.environ.get("METRICS_BLOB", "models/metrics_v4.json")
 SPATIAL_BLOB         = os.environ.get("SPATIAL_BLOB", "models/spatial_inference.pkl")
+ARIMA_BLOB           = os.environ.get("ARIMA_BLOB", "models/arima_bundle_v4.pkl")
 BLOCK_LOOKUP_BLOB    = os.environ.get("BLOCK_LOOKUP_BLOB", "models/block_lookup.parquet")
 RPI_BLOB             = os.environ.get("RPI_BLOB", "hdb_rpi.csv")
+
+
+def _ensure_arima_v4_import_path() -> None:
+    """Pickled ``ARIMABundle`` resolves ``arima_v4.*``; Docker copies ``arima_v4.py`` to ``/app``."""
+    try:
+        import arima_v4  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+    repo_root = Path(__file__).resolve().parents[2]
+    tv4 = repo_root / "training" / "v4"
+    if tv4.is_dir() and (tv4 / "arima_v4.py").exists():
+        p = str(tv4)
+        if p not in sys.path:
+            sys.path.insert(0, p)
 
 # Local dir with artifact files (development); when set, skips GCS for matching basenames.
 BACKEND_ARTIFACT_DIR = os.environ.get("BACKEND_ARTIFACT_DIR", "").strip()
@@ -44,7 +62,7 @@ def _download_blob_to_tmp(blob_path: str, suffix: str) -> str:
 
 @lru_cache(maxsize=1)
 def load_model() -> CatBoostRegressor:
-    logger.info("Loading CatBoost v2 model...")
+    logger.info("Loading CatBoost model (%s)...", MODEL_BLOB.rsplit("/", 1)[-1])
     lp = _local_path(MODEL_BLOB.rsplit("/", 1)[-1])
     if lp:
         tmp_path = str(lp)
@@ -56,7 +74,7 @@ def load_model() -> CatBoostRegressor:
     model.load_model(tmp_path)
     if delete_after:
         os.unlink(tmp_path)
-    logger.info("model_catboost_v2 loaded ✅")
+    logger.info("CatBoost model loaded ✅")
     return model
 
 
@@ -70,8 +88,28 @@ def load_inference_metrics() -> dict:
         client = storage.Client()
         raw = client.bucket(GCS_BUCKET).blob(METRICS_BLOB).download_as_bytes()
         data = json.loads(raw.decode("utf-8"))
-    logger.info("metrics_catboost_v2 loaded (%s features)", len(data.get("features", [])))
+    logger.info("inference metrics loaded (%s features)", len(data.get("features", [])))
     return data
+
+
+@lru_cache(maxsize=1)
+def load_arima_bundle():
+    """Unpickle v4 ``ARIMABundle`` (requires ``statsmodels`` + importable ``arima_v4``)."""
+    _ensure_arima_v4_import_path()
+    from arima_v4 import ARIMABundle
+
+    fname = ARIMA_BLOB.rsplit("/", 1)[-1]
+    lp = _local_path(fname)
+    if lp:
+        bundle = ARIMABundle.load(lp)
+    else:
+        tmp_path = _download_blob_to_tmp(ARIMA_BLOB, ".pkl")
+        try:
+            bundle = ARIMABundle.load(Path(tmp_path))
+        finally:
+            os.unlink(tmp_path)
+    logger.info("ARIMA bundle loaded ✅")
+    return bundle
 
 
 @lru_cache(maxsize=1)

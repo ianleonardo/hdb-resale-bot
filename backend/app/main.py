@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from google.cloud import storage
 
 from app.model_loader import (
+    load_arima_bundle,
     load_block_lookup,
     load_inference_metrics,
     load_model,
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="HDB Resale Price Estimator", version="5.0.0")
 GCS_BUCKET    = os.environ.get("GCS_BUCKET", "hdb-resale-artifacts")
-MODEL_VERSION = os.environ.get("MODEL_VERSION", "catboost-v2")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "catboost-arima-v4")
 
 
 @app.exception_handler(RequestValidationError)
@@ -42,15 +43,17 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
 @app.on_event("startup")
 async def startup():
-    """Warm model + v2 inference artifacts (metrics, spatial bundle, block lookup, RPI)."""
+    """Warm model + inference artifacts (metrics, spatial, block lookup, RPI; ARIMA bundle when v4 metrics)."""
     loop = asyncio.get_event_loop()
     try:
         await loop.run_in_executor(None, load_model)
-        await loop.run_in_executor(None, load_inference_metrics)
+        metrics = await loop.run_in_executor(None, load_inference_metrics)
         await loop.run_in_executor(None, load_spatial_bundle)
         await loop.run_in_executor(None, load_block_lookup)
         await loop.run_in_executor(None, load_rpi_quarters_df)
-        logger.info("CatBoost v2 artifacts warmed ✅")
+        if metrics.get("arima_features"):
+            await loop.run_in_executor(None, load_arima_bundle)
+        logger.info("Inference artifacts warmed ✅")
     except Exception as exc:
         logger.warning("Artifacts not loaded at startup (will retry on first request): %s", exc)
 
@@ -79,7 +82,7 @@ async def predict(req: PredictRequest):
         logger.error("Prediction pipeline failed: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail="Model or inference artifacts unavailable. Run training pipeline and upload v2 artifacts.",
+            detail="Model or inference artifacts unavailable. Run training pipeline and upload artifacts.",
         ) from exc
 
     # Conservative haircut vs raw model output (business calibration).
