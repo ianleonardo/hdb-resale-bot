@@ -3,36 +3,35 @@ train_v4.py — HDB resale price training pipeline: ARIMA market baseline + CatB
 
 Strategy
 --------
-  1. ARIMA fits per-(town, flat_type) monthly price series on 2017-2024 data.
-     For each transaction it provides 5 difference/relative features derived from
-     the ARIMA forecast at periods M-3, M, M+3 — never raw absolute price levels.
-     Using absolute in-sample fitted values would give training rows a near-perfect
-     level proxy while val/test rows receive potentially biased out-of-sample
-     forecasts; difference features cancel that asymmetry.
+  1. ARIMA fits on 2017-2024 monthly log-price series: a **global** model, optional
+     **per-(town, flat_type)** models (fallback to global when sparse), and an
+     **RPI** series model inside the bundle for inference hooks.  The two CatBoost
+     inputs from this bundle are **relative/static** only (see ``ARIMA_FEATURES`` in
+     ``arima_v4.py``): never raw resale price levels.
 
-  2. CatBoost is trained on 2020-2024 with all 49 v2 features PLUS the 5 ARIMA
-     features.  The model learns to blend the macro trend signal from ARIMA with
-     unit-specific signals (floor, area, lease, amenities, location).
+  2. CatBoost is trained on **2020-2024** with the shared v2-style engineered +
+     spatial + RPI features, plus **two** ARIMA columns
+     (``arima_seg_vs_global``, ``arima_seg_series_std``).  It blends macro drift /
+     segment positioning from ARIMA with unit-specific signals (floor, area,
+     lease, amenities, location).
 
-  3. For a future-date query (e.g. October 2026), the backend calls:
-         bundle.get_arima_features(query_df)   → 5 market-forecast columns
-         model.predict(catboost_pool)           → log-price → expm1 → SGD price
+  3. At inference the backend loads ``ARIMABundle`` and calls
+     ``get_arima_features(query_df)`` for those columns, then CatBoost predicts
+     **log-price** and ``expm1`` yields SGD.
 
 Leakage controls
 ----------------
   • ARIMA trained on 2017-2024 raw transactions only (not val / test).
-  • ARIMA in-sample fitted value ≠ raw price — it is the model's smoothed estimate,
-    same as using fitted values from any linear model as a feature.
   • KDTree spatial encoding: past-only trees for training rows; full training tree
     for val / test (unchanged from v2).
   • CatBoost early stopping on val MAE (2025).
 
 Artifacts saved to training/v4/artifacts/
-  model_v4.cbm          CatBoost model
-  arima_bundle_v4.pkl   All ARIMA models + series (for inference)
-  metrics_v4.json       Evaluation metrics + metadata
+  model_v4.cbm              CatBoost model
+  arima_bundle_v4.pkl       Pickled ``ARIMABundle`` (statsmodels + pandas)
+  metrics_v4.json           Metrics + feature list + hyperparameters
   feature_importance_v4.csv
-  spatial_inference.pkl KDTree bundle (same format as v2, used by backend)
+  spatial_inference.pkl     KDTree bundle (same format as v2, used by backend)
 """
 
 from __future__ import annotations

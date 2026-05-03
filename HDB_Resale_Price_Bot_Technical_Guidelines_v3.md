@@ -20,24 +20,18 @@
 
 1. [System Overview](#1-system-overview)
 2. [Architecture Design](#2-architecture-design)
-3. [LLM Conversation Engine — Gemini](#3-llm-conversation-engine--gemini)
-4. [Singlish Persona & Tone Design](#4-singlish-persona--tone-design)
-5. [Topic Guardrail Design](#5-topic-guardrail-design)
-6. [Telegram Bot — Integration Layer](#6-telegram-bot--integration-layer)
-7. [Python In-Process Session Cache](#7-python-in-process-session-cache)
-8. [Backend API Service](#8-backend-api-service)
-9. [Machine Learning Model](#9-machine-learning-model)
-10. [Data Preprocessing Pipeline](#10-data-preprocessing-pipeline)
-11. [ML Algorithm Proposals](#11-ml-algorithm-proposals)
-12. [Model Training & Evaluation](#12-model-training--evaluation)
-13. [Feature Engineering](#13-feature-engineering)
-14. [Google Cloud Storage — Artifact & Log Management](#14-google-cloud-storage--artifact--log-management)
-15. [Google Cloud Run — Deployment](#15-google-cloud-run--deployment)
-16. [API Contract](#16-api-contract)
-17. [Environment & Configuration](#17-environment--configuration)
-18. [Tech Stack Summary](#18-tech-stack-summary)
-19. [Project Structure](#19-project-structure)
-20. [Development Roadmap](#20-development-roadmap)
+3. [LLM Conversation](#3-llm-conversation)
+4. [Telegram Bot — Integration Layer](#4-telegram-bot--integration-layer)
+5. [Backend API Service](#5-backend-api-service)
+6. [Python In-Process Session Cache](#6-python-in-process-session-cache)
+7. [ML Pipeline — Data, Model & Training](#7-ml-pipeline--data-model--training)
+8. [Google Cloud Storage — Artifact & Log Management](#8-google-cloud-storage--artifact--log-management)
+9. [Google Cloud Run — Deployment](#9-google-cloud-run--deployment)
+10. [API Contract](#10-api-contract)
+11. [Environment & Configuration](#11-environment--configuration)
+12. [Tech Stack Summary](#12-tech-stack-summary)
+13. [Project Structure](#13-project-structure)
+14. [Development Roadmap](#14-development-roadmap)
 
 ---
 
@@ -45,48 +39,35 @@
 
 ### 1.1 Architecture Overview
 
+```mermaid
+flowchart TB
+  U[Telegram user] --> BOT[hdb-bot Cloud Run webhook plus TTLCache session]
+  BOT --> GEM[Gemini Uncle HDB JSON plus Singlish]
+  GEM --> BOT
+  BOT --> BE[hdb-backend FastAPI]
+  BE --> ML[Feature row plus ML inference artifacts from GCS]
+  ML --> BE
+  BOT --> U2[Formatted Singlish reply]
 ```
-[Telegram User — types anything, Singlish or English]
-      │
-      ▼
-[Cloud Run: Telegram Bot Service]     ← python-telegram-bot v21 + webhook
-      │  session lookup from Python TTL Cache (in-process, cachetools)
-      ▼
-[Cloud Run: LLM Conversation Engine]  ← Google Gemini 2.0 Flash (google-genai SDK)
-      │  - Uncle HDB persona, Singlish style
-      │  - Extracts 8 flat parameters from free-form chat
-      │  - Enforces HDB resale topic guardrail
-      │  - Returns structured JSON + Singlish reply
-      ▼
-[Cloud Run: Backend FastAPI Service]  ← FastAPI + Pydantic v2
-      │  - Feature engineering
-      │  - ML model inference (model loaded from GCS on startup)
-      ▼
-[ML Inference Engine]                 ← LightGBM / CatBoost (model.pkl from GCS)
-      │
-      ▼
-[LLM formats result in Singlish → back to user via Telegram]
-```
+
+ASCII fallback (same flow): User → **hdb-bot** → **Gemini** → **hdb-backend** → ML/GCS → reply.
 
 ### 1.2 Deployment Topology
 
 All three services are deployed as **independent Cloud Run services**:
 
+```mermaid
+flowchart TB
+  subgraph GCP[GCP project]
+    BOT[hdb-bot]
+    BACK[hdb-backend]
+    GCS[("GCS bucket hdb-resale-artifacts")]
+  end
+  BOT --> BACK
+  BACK --> GCS
 ```
-GCP Project
-│
-├── Cloud Run: hdb-bot          (Telegram webhook handler + LLM engine)
-├── Cloud Run: hdb-backend      (FastAPI ML inference service)
-│
-└── Cloud Storage: hdb-resale-artifacts/
-        ├── models/
-        │   ├── model.pkl
-        │   └── preprocessor.pkl
-        ├── logs/
-        │   └── predictions/YYYY/MM/DD/predictions_*.jsonl
-        └── training/
-            └── hdb_resale_2017_2026.csv
-```
+
+Legacy layout reference: **models/** (`model.pkl` / `.cbm` depending on version), **logs/predictions/**, optional **training/** CSV — see §8 for current artifact names.
 
 ### 1.3 Design Principles (v3.0)
 
@@ -102,46 +83,31 @@ GCP Project
 
 ### 2.1 Detailed Component Diagram
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                            TELEGRAM PLATFORM                             │
-│  User ──► Telegram Servers ──► HTTPS Webhook POST to Cloud Run           │
-└──────────────────────────────────┬───────────────────────────────────────┘
-                                   │ message.text + chat_id
-┌──────────────────────────────────▼───────────────────────────────────────┐
-│              Cloud Run: hdb-bot  (min-instances: 1)                      │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  Telegram Message Router                                           │  │
-│  │  ① Lookup ConversationState from TTLCache[chat_id]                 │  │
-│  │  ② Quick topic pre-filter (keyword check)                          │  │
-│  │  ③ Call Gemini LLM Engine with history + collected_params          │  │
-│  │  ④ Parse LLM JSON response                                         │  │
-│  │  ⑤ Merge new params into TTLCache session                          │  │
-│  │  ⑥ If ready_to_predict → call hdb-backend /predict                 │  │
-│  │  ⑦ LLM formats result → send to Telegram                           │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  Python TTLCache  (cachetools.TTLCache, maxsize=500, ttl=3600)     │  │
-│  │  Key: chat_id  │  Value: { history[], collected_params{} }         │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────┬───────────────────────────────────────┘
-                                   │ POST /predict (internal HTTPS)
-┌──────────────────────────────────▼───────────────────────────────────────┐
-│              Cloud Run: hdb-backend  (min-instances: 1)                  │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  FastAPI  /predict                                                  │  │
-│  │  ① Pydantic validation                                              │  │
-│  │  ② Feature engineering                                              │  │
-│  │  ③ Model inference (model loaded from GCS at cold start)            │  │
-│  │  ④ lru_cache: model/preprocessor cached in-process after load      │  │
-│  │  ⑤ Stream prediction log → GCS bucket (async, fire-and-forget)     │  │
-│  └────────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────┬───────────────────────────────────────┘
-                                   │
-┌──────────────────────────────────▼───────────────────────────────────────┐
-│        GCS Bucket: hdb-resale-artifacts                                  │
-│   models/model.pkl  ·  models/preprocessor.pkl  ·  logs/*.jsonl          │
-└──────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph TG[Telegram]
+    USER[User]
+    SRV[Telegram servers]
+  end
+  USER --> SRV
+  SRV -->|webhook POST| BOT[hdb-bot Cloud Run]
+  subgraph BOTSUB[hdb-bot]
+    ROUTER[Router TTLCache topic filter Gemini merge params]
+    CACHE[(TTLCache chat_id)]
+    ROUTER --- CACHE
+  end
+  BOT --> ROUTER
+  ROUTER --> GEM[Gemini]
+  GEM --> ROUTER
+  ROUTER -->|POST /predict OIDC| BE[hdb-backend FastAPI]
+  subgraph BESUB[hdb-backend]
+    PV[predict endpoint Pydantic validate]
+    FE[Features plus inference]
+    LOG[GCS prediction log async]
+    PV --> FE --> LOG
+  end
+  BE --> PV
+  FE --> GCS[(GCS artifacts plus logs)]
 ```
 
 ### 2.2 Communication Flow
@@ -163,8 +129,7 @@ GCP Project
 ```
 
 ---
-
-## 3. LLM Conversation Engine — Gemini
+## 3. LLM Conversation
 
 ### 3.1 LLM Choice
 
@@ -467,11 +432,10 @@ Reply:  "Hmm 'normal one' got a few possibilities leh 😅
          These three are the most common 'normal' ones."
 ```
 
+
 ---
 
-## 4. Singlish Persona & Tone Design
-
-### 4.1 Singlish Vocabulary Reference
+### 3.6 Singlish Vocabulary Reference
 
 
 | Expression          | Meaning / Use Case                                               |
@@ -495,7 +459,7 @@ Reply:  "Hmm 'normal one' got a few possibilities leh 😅
 | `kakak` / `uncle`   | Friendly self-reference                                          |
 
 
-### 4.2 Tone Rules
+### 3.7 Tone Rules
 
 - **Short paragraphs**: 2–3 sentences, then newline.
 - **Acknowledge first**: Comment on what user said before asking next question.
@@ -504,7 +468,7 @@ Reply:  "Hmm 'normal one' got a few possibilities leh 😅
 - **Emoji discipline**: 1 max on follow-up turns, 2 max on greetings/results.
 - **Never repeat** the same particle (`lah`) in consecutive sentences.
 
-### 4.3 Welcome Message Template
+### 3.8 Welcome Message Template
 
 ```
 /start or /estimate:
@@ -519,9 +483,7 @@ So, which flat you want to check ah? 🏠"
 
 ---
 
-## 5. Topic Guardrail Design
-
-### 5.1 Two-Layer Guardrail
+### 3.9 Two-Layer Guardrail
 
 
 | Layer       | Mechanism                                    | Purpose                                                      |
@@ -530,7 +492,7 @@ So, which flat you want to check ah? 🏠"
 | **Layer 2** | Gemini system prompt instructions            | Nuanced handling of ambiguous / partially on-topic messages  |
 
 
-### 5.2 Keyword Pre-Filter
+### 3.10 Keyword Pre-Filter
 
 ```python
 # bot/guards/topic_check.py
@@ -580,7 +542,7 @@ def quick_topic_check(message: str) -> str:
     return "ambiguous"
 ```
 
-### 5.3 Allowed vs. Redirected Topics
+### 3.11 Allowed vs. Redirected Topics
 
 
 | Topic                                | Handling                                                          |
@@ -595,11 +557,12 @@ def quick_topic_check(message: str) -> str:
 | ❌ Pure chitchat                      | One-liner acknowledgement, steer back                             |
 
 
+
 ---
 
-## 6. Telegram Bot — Integration Layer
+## 4. Telegram Bot — Integration Layer
 
-### 6.1 Technology
+### 4.1 Technology
 
 
 | Component        | Choice                             |
@@ -612,7 +575,7 @@ def quick_topic_check(message: str) -> str:
 | Web server       | `uvicorn` (for webhook endpoint)   |
 
 
-### 6.2 Main Bot Application
+### 4.2 Main Bot Application
 
 ```python
 # bot/main.py
@@ -744,130 +707,9 @@ if __name__ == "__main__":
 ```
 
 ---
+## 5. Backend API Service
 
-## 7. Python In-Process Session Cache
-
-### 7.1 Design Rationale
-
-Cloud Run is used with `**min-instances: 1**` for the bot service. This keeps one warm instance alive at all times, making in-process `TTLCache` a viable session store for MVP scale (hundreds of concurrent users). No Redis, no external dependency, no network hop.
-
-> ⚠️ **Scaling note**: If you ever scale hdb-bot to `min-instances > 1` or `max-instances > 1`, sessions won't be shared across instances. For that scenario, either use Cloud Memorystore (managed Redis) or route Telegram traffic to a single instance via a session-affinity load balancer. For MVP (1 instance), TTLCache is perfectly sufficient.
-
-### 7.2 SessionCache Implementation
-
-```python
-# bot/cache/session.py
-import threading
-from cachetools import TTLCache
-
-DEFAULT_PARAMS = {
-    "town": None, "flat_type": None, "flat_model": None,
-    "storey_range": None, "floor_area_sqm": None,
-    "remaining_lease_years": None, "street_name": None, "block": None,
-}
-
-class SessionCache:
-    """
-    Thread-safe in-process TTL cache for Telegram conversation sessions.
-    maxsize=500: supports ~500 concurrent active sessions.
-    ttl=3600:    sessions expire after 1 hour of inactivity.
-    """
-
-    def __init__(self, maxsize: int = 500, ttl: int = 3600):
-        self._cache = TTLCache(maxsize=maxsize, ttl=ttl)
-        self._lock  = threading.Lock()
-
-    def _default_state(self) -> dict:
-        return {
-            "history":          [],
-            "collected_params": dict(DEFAULT_PARAMS),
-        }
-
-    def get(self, chat_id: int) -> dict:
-        with self._lock:
-            if chat_id not in self._cache:
-                self._cache[chat_id] = self._default_state()
-            return self._cache[chat_id]
-
-    def clear(self, chat_id: int) -> None:
-        with self._lock:
-            self._cache.pop(chat_id, None)
-
-    def append_history(self, chat_id: int, role: str, content: str) -> None:
-        with self._lock:
-            state = self._cache.setdefault(chat_id, self._default_state())
-            state["history"].append({"role": role, "content": content})
-            # Keep last 30 turns to cap memory usage
-            state["history"] = state["history"][-30:]
-
-    def merge_params(self, chat_id: int, new_params: dict) -> None:
-        """Merge extracted params — null values do NOT overwrite existing values."""
-        with self._lock:
-            state = self._cache.setdefault(chat_id, self._default_state())
-            for key, val in new_params.items():
-                if val is not None and key in state["collected_params"]:
-                    state["collected_params"][key] = val
-
-    def is_complete(self, chat_id: int) -> bool:
-        with self._lock:
-            state = self._cache.get(chat_id, self._default_state())
-            return all(v is not None for v in state["collected_params"].values())
-```
-
-### 7.3 Model Artifact Cache (Backend)
-
-The backend uses `functools.lru_cache` to load model artifacts from GCS **once per process lifetime** — subsequent prediction calls reuse the in-memory objects with zero I/O.
-
-```python
-# backend/app/model_loader.py
-import joblib, io, logging
-from functools import lru_cache
-from google.cloud import storage
-
-logger = logging.getLogger(__name__)
-GCS_BUCKET = "hdb-resale-artifacts"
-
-
-@lru_cache(maxsize=1)
-def load_model():
-    """Load LightGBM model from GCS. Cached for process lifetime."""
-    logger.info("Loading model from GCS...")
-    return _load_pkl_from_gcs("models/model.pkl")
-
-
-@lru_cache(maxsize=1)
-def load_preprocessor():
-    """Load sklearn preprocessor from GCS. Cached for process lifetime."""
-    logger.info("Loading preprocessor from GCS...")
-    return _load_pkl_from_gcs("models/preprocessor.pkl")
-
-
-def _load_pkl_from_gcs(blob_path: str):
-    client = storage.Client()
-    bucket = client.bucket(GCS_BUCKET)
-    blob   = bucket.blob(blob_path)
-    buf    = io.BytesIO()
-    blob.download_to_file(buf)
-    buf.seek(0)
-    return joblib.load(buf)
-```
-
-### 7.4 Cache Sizing Guidelines
-
-
-| Concurrent Sessions | Recommended `maxsize` | Avg Memory |
-| ------------------- | --------------------- | ---------- |
-| < 100               | 200                   | ~20 MB     |
-| 100 – 500           | 500 (default)         | ~50 MB     |
-| 500 – 2,000         | 2000                  | ~200 MB    |
-| > 2,000             | Use Cloud Memorystore | N/A        |
-
-
----
-
-## 8. Backend API Service
-
-### 8.1 FastAPI Application
+### 5.1 FastAPI Application
 
 ```python
 # backend/app/main.py
@@ -1004,388 +846,518 @@ async def _log_prediction_to_gcs(req: PredictRequest, result: PredictResponse):
         logger.warning(f"GCS log write failed (non-critical): {exc}")
 ```
 
----
+### 5.2 `build_inference_pool` — Mermaid diagrams
 
-## 9. Machine Learning Model
+Production **`POST /predict`** builds the CatBoost **`Pool`** in **`backend/app/preprocessing.py`** (`build_inference_pool`). The snippet in §5.1 above is a simplified legacy illustration; this pipeline matches the **current** backend.
 
-### 9.1 Input Features
+**Pipeline:**
 
-
-| Feature             | Source Column         | Type             | Notes             |
-| ------------------- | --------------------- | ---------------- | ----------------- |
-| Town                | `town`                | Categorical      | 26 unique values  |
-| Flat Type           | `flat_type`           | Categorical      | 7 values, ordinal |
-| Flat Model          | `flat_model`          | Categorical      | 21 values         |
-| Storey Midpoint     | `storey_range`        | Numerical        | `(low+high)/2`    |
-| Floor Area          | `floor_area_sqm`      | Numerical        | 20–300 sqm        |
-| Remaining Lease     | `remaining_lease`     | Numerical        | Decimal years     |
-| Lease Commence Date | `lease_commence_date` | Numerical        | Year integer      |
-| Transaction Year    | `month`               | Temporal         | `dt.year`         |
-| Transaction Month   | `month`               | Temporal         | `dt.month`        |
-| Street Name         | `street_name`         | High-cardinality | Target encoding   |
-| Block               | `block`               | High-cardinality | Target encoding   |
-
-
-**Target**: `resale_price` → `np.log1p` transformed during training; `np.expm1` at inference.
-
----
-
-## 10. Data Preprocessing Pipeline
-
-```python
-# training/preprocessing.py
-import pandas as pd, numpy as np
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder, StandardScaler
-from category_encoders import TargetEncoder
-
-ORDINAL_FLAT_TYPE = ['1 ROOM','2 ROOM','3 ROOM','4 ROOM',
-                     '5 ROOM','EXECUTIVE','MULTI-GENERATION']
-
-NUMERIC_FEATURES  = ['floor_area_sqm','storey_midpoint','remaining_lease_years',
-                     'lease_commence_date','transaction_year','transaction_month']
-ORDINAL_FEATURES  = ['flat_type']
-NOMINAL_FEATURES  = ['town','flat_model']
-HIGH_CARD         = ['street_name','block']
-
-
-def build_preprocessor() -> ColumnTransformer:
-    return ColumnTransformer(transformers=[
-        ('num', StandardScaler(),
-         NUMERIC_FEATURES),
-        ('ord', OrdinalEncoder(categories=[ORDINAL_FLAT_TYPE]),
-         ORDINAL_FEATURES),
-        ('nom', OneHotEncoder(handle_unknown='ignore', sparse_output=False),
-         NOMINAL_FEATURES),
-        ('hc',  TargetEncoder(smoothing=10),
-         HIGH_CARD),
-    ])
-
-
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df['transaction_year']      = pd.to_datetime(df['month']).dt.year
-    df['transaction_month']     = pd.to_datetime(df['month']).dt.month
-    df['storey_midpoint']       = df['storey_range'].str.extract(
-        r'(\d+) TO (\d+)').astype(float).mean(axis=1)
-    y  = df['remaining_lease'].str.extract(r'(\d+)\s*year').fillna(0).astype(float)[0]
-    m  = df['remaining_lease'].str.extract(r'(\d+)\s*month').fillna(0).astype(float)[0]
-    df['remaining_lease_years'] = y + m / 12
-    df['log_resale_price']      = np.log1p(df['resale_price'])
-    return df
+```mermaid
+flowchart TD
+  START([build_inference_pool req])
+  START --> LOAD[load_inference_metrics plus load_spatial_bundle]
+  LOAD --> LK[fallback template plus block_lookup fuzzy street]
+  REQ[PredictRequest fields] --> LK
+  LK --> ROW[One-row raw DataFrame]
+  ROW --> EF[engineer_features]
+  EF --> RPI[add_official_rpi]
+  RPI --> MAC[add_macro_interaction_features]
+  MAC --> SPAT[lat lon query plus spatial encode uses KDTree bundle]
+  SPAT --> ARCHK{metrics arima_features non-empty?}
+  ARCHK -->|yes| AB[load_arima_bundle]
+  AB --> GF[get_arima_features]
+  ARCHK -->|no| PX[prepare_X]
+  GF --> PX
+  PX --> POOL[CatBoost Pool]
 ```
 
-### Time-Based Split
+**Loader interactions:**
 
+```mermaid
+sequenceDiagram
+  participant BIP as build_inference_pool
+  participant ML as model_loader
+  participant BL as block_lookup
+  participant IF as inference_features
+  participant AR as ARIMABundle
 
-| Split      | Period            | Share |
-| ---------- | ----------------- | ----- |
-| Train      | 2017-01 – 2024-12 | ~85%  |
-| Validation | 2025-01 – 2025-09 | ~10%  |
-| Test       | 2025-10 – 2026-03 | ~5%   |
-
-
-> ⚠️ Always use **time-based splits** — random splits cause data leakage on price-trend features.
+  BIP->>ML: load_inference_metrics
+  BIP->>ML: load_spatial_bundle
+  BIP->>ML: load_block_lookup
+  BIP->>BL: town block optional street fuzzy match
+  Note over BIP: raw DataFrame mid_storey lease lat lon
+  BIP->>IF: engineer_features
+  BIP->>ML: load_rpi_quarters_df
+  BIP->>IF: add_official_rpi
+  BIP->>IF: add_macro_interaction_features
+  BIP->>IF: query_coords_from_lat_lon encode_queries_spatial
+  alt metrics include arima_features
+    BIP->>ML: load_arima_bundle
+    BIP->>AR: get_arima_features DataFrame
+  end
+  BIP->>IF: prepare_X
+  Note over BIP: return Pool
+```
 
 ---
+## 6. Python In-Process Session Cache
 
-## 11. ML Algorithm Proposals
+### 6.1 Design Rationale
 
-### 11.1 Recommended Models
+Cloud Run is used with `**min-instances: 1**` for the bot service. This keeps one warm instance alive at all times, making in-process `TTLCache` a viable session store for MVP scale (hundreds of concurrent users). No Redis, no external dependency, no network hop.
 
-#### 🥇 LightGBM *(Primary Recommendation)*
+> ⚠️ **Scaling note**: If you ever scale hdb-bot to `min-instances > 1` or `max-instances > 1`, sessions won't be shared across instances. For that scenario, either use Cloud Memorystore (managed Redis) or route Telegram traffic to a single instance via a session-affinity load balancer. For MVP (1 instance), TTLCache is perfectly sufficient.
 
-```python
-import lightgbm as lgb
-
-model = lgb.LGBMRegressor(
-    n_estimators=1000, learning_rate=0.05, num_leaves=63,
-    min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
-    reg_alpha=0.1, reg_lambda=0.1, random_state=42, n_jobs=-1
-)
-model.fit(X_train, y_train, eval_set=[(X_val, y_val)],
-          callbacks=[lgb.early_stopping(50), lgb.log_evaluation(100)])
-```
-
-**Strengths**: Fastest, handles mixed types, built-in feature importance, minimal memory footprint on Cloud Run.
-
-#### 🥈 XGBoost
+### 6.2 SessionCache Implementation
 
 ```python
-import xgboost as xgb
+# bot/cache/session.py
+import threading
+from cachetools import TTLCache
 
-model = xgb.XGBRegressor(
-    n_estimators=1000, learning_rate=0.05, max_depth=6,
-    subsample=0.8, colsample_bytree=0.8,
-    eval_metric='rmse', early_stopping_rounds=50, random_state=42
-)
-```
-
-#### 🥉 CatBoost *(Best for raw categoricals)*
-
-```python
-from catboost import CatBoostRegressor
-
-model = CatBoostRegressor(
-    iterations=1000, learning_rate=0.05, depth=8,
-    cat_features=['town','flat_type','flat_model','street_name','block'],
-    loss_function='RMSE', early_stopping_rounds=50
-)
-```
-
-#### 🔬 Stacking Ensemble *(Highest accuracy, highest complexity)*
-
-```python
-from sklearn.ensemble import StackingRegressor
-from sklearn.linear_model import Ridge
-
-stack = StackingRegressor(
-    estimators=[
-        ('lgbm', lgb.LGBMRegressor(...)),
-        ('xgb',  xgb.XGBRegressor(...)),
-        ('cat',  CatBoostRegressor(...)),
-    ],
-    final_estimator=Ridge(alpha=1.0),
-    cv=5
-)
-```
-
-### 11.2 Model Comparison Matrix
-
-
-| Model    | Accuracy | Train Speed | Inference Speed | Categorical Support | Interpretability |
-| -------- | -------- | ----------- | --------------- | ------------------- | ---------------- |
-| LightGBM | ⭐⭐⭐⭐⭐    | ⭐⭐⭐⭐⭐       | ⭐⭐⭐⭐⭐           | ⭐⭐⭐⭐                | ⭐⭐⭐⭐             |
-| XGBoost  | ⭐⭐⭐⭐⭐    | ⭐⭐⭐⭐        | ⭐⭐⭐⭐⭐           | ⭐⭐⭐                 | ⭐⭐⭐⭐             |
-| CatBoost | ⭐⭐⭐⭐⭐    | ⭐⭐⭐         | ⭐⭐⭐⭐            | ⭐⭐⭐⭐⭐               | ⭐⭐⭐              |
-| Stacking | ⭐⭐⭐⭐⭐    | ⭐⭐          | ⭐⭐⭐             | ⭐⭐⭐⭐                | ⭐⭐               |
-
-
----
-
-## 12. Model Training & Evaluation
-
-### 12.1 Training Script
-
-```python
-# training/train.py
-import pandas as pd, numpy as np, joblib, json, io
-from pathlib import Path
-from datetime import datetime
-import lightgbm as lgb
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from google.cloud import storage
-from training.preprocessing import build_preprocessor, engineer_features
-
-GCS_BUCKET   = "hdb-resale-artifacts"
-DATA_BLOB    = "training/hdb_resale_2017_2026.csv"
-LOCAL_ARTIFACTS = Path("artifacts/")
-LOCAL_ARTIFACTS.mkdir(exist_ok=True)
-
-# --- Load data from GCS ---
-gcs = storage.Client()
-csv_bytes = gcs.bucket(GCS_BUCKET).blob(DATA_BLOB).download_as_bytes()
-df = pd.read_csv(io.BytesIO(csv_bytes))
-df = engineer_features(df)
-
-# --- Time-based split ---
-train_df = df[df['transaction_year'] <= 2024]
-val_df   = df[(df['transaction_year'] == 2025) & (df['transaction_month'] <= 9)]
-test_df  = df[df['transaction_year'] >= 2026]
-
-FEATURES = [
-    'town','flat_type','flat_model','storey_midpoint','floor_area_sqm',
-    'remaining_lease_years','lease_commence_date',
-    'transaction_year','transaction_month','street_name','block'
-]
-TARGET = 'log_resale_price'
-
-preprocessor = build_preprocessor()
-X_train = preprocessor.fit_transform(train_df[FEATURES], train_df[TARGET])
-X_val   = preprocessor.transform(val_df[FEATURES])
-X_test  = preprocessor.transform(test_df[FEATURES])
-y_train, y_val, y_test = train_df[TARGET], val_df[TARGET], test_df[TARGET]
-
-# --- Train ---
-model = lgb.LGBMRegressor(
-    n_estimators=2000, learning_rate=0.03, num_leaves=127,
-    min_child_samples=20, subsample=0.8, colsample_bytree=0.8,
-    reg_alpha=0.1, reg_lambda=1.0, random_state=42, n_jobs=-1
-)
-model.fit(
-    X_train, y_train,
-    eval_set=[(X_val, y_val)],
-    callbacks=[lgb.early_stopping(100), lgb.log_evaluation(200)]
-)
-
-# --- Evaluate ---
-def evaluate(name: str, X, y_log):
-    pred = np.expm1(model.predict(X))
-    true = np.expm1(y_log)
-    mae  = mean_absolute_error(true, pred)
-    rmse = np.sqrt(mean_squared_error(true, pred))
-    mape = np.mean(np.abs((true - pred) / true)) * 100
-    r2   = r2_score(true, pred)
-    print(f"{name}: MAE={mae:,.0f} | RMSE={rmse:,.0f} | MAPE={mape:.2f}% | R²={r2:.4f}")
-    return {"MAE": mae, "RMSE": rmse, "MAPE": mape, "R2": r2}
-
-metrics = {
-    "trained_at":  datetime.utcnow().isoformat(),
-    "validation":  evaluate("Validation", X_val,  y_val),
-    "test":        evaluate("Test",        X_test, y_test),
+DEFAULT_PARAMS = {
+    "town": None, "flat_type": None, "flat_model": None,
+    "storey_range": None, "floor_area_sqm": None,
+    "remaining_lease_years": None, "street_name": None, "block": None,
 }
 
-# --- Save locally then upload to GCS ---
-joblib.dump(model,        LOCAL_ARTIFACTS / "model.pkl")
-joblib.dump(preprocessor, LOCAL_ARTIFACTS / "preprocessor.pkl")
-json.dump(metrics,        open(LOCAL_ARTIFACTS / "metrics.json", "w"), indent=2)
+class SessionCache:
+    """
+    Thread-safe in-process TTL cache for Telegram conversation sessions.
+    maxsize=500: supports ~500 concurrent active sessions.
+    ttl=3600:    sessions expire after 1 hour of inactivity.
+    """
 
-bucket = gcs.bucket(GCS_BUCKET)
-for fname in ["model.pkl", "preprocessor.pkl", "metrics.json"]:
-    bucket.blob(f"models/{fname}").upload_from_filename(str(LOCAL_ARTIFACTS / fname))
-    print(f"Uploaded {fname} → gs://{GCS_BUCKET}/models/{fname}")
+    def __init__(self, maxsize: int = 500, ttl: int = 3600):
+        self._cache = TTLCache(maxsize=maxsize, ttl=ttl)
+        self._lock  = threading.Lock()
+
+    def _default_state(self) -> dict:
+        return {
+            "history":          [],
+            "collected_params": dict(DEFAULT_PARAMS),
+        }
+
+    def get(self, chat_id: int) -> dict:
+        with self._lock:
+            if chat_id not in self._cache:
+                self._cache[chat_id] = self._default_state()
+            return self._cache[chat_id]
+
+    def clear(self, chat_id: int) -> None:
+        with self._lock:
+            self._cache.pop(chat_id, None)
+
+    def append_history(self, chat_id: int, role: str, content: str) -> None:
+        with self._lock:
+            state = self._cache.setdefault(chat_id, self._default_state())
+            state["history"].append({"role": role, "content": content})
+            # Keep last 30 turns to cap memory usage
+            state["history"] = state["history"][-30:]
+
+    def merge_params(self, chat_id: int, new_params: dict) -> None:
+        """Merge extracted params — null values do NOT overwrite existing values."""
+        with self._lock:
+            state = self._cache.setdefault(chat_id, self._default_state())
+            for key, val in new_params.items():
+                if val is not None and key in state["collected_params"]:
+                    state["collected_params"][key] = val
+
+    def is_complete(self, chat_id: int) -> bool:
+        with self._lock:
+            state = self._cache.get(chat_id, self._default_state())
+            return all(v is not None for v in state["collected_params"].values())
 ```
 
-### 12.2 Target Metrics
+### 6.3 Model Artifact Cache (Backend)
 
-
-| Metric | Target       |
-| ------ | ------------ |
-| MAE    | < SGD 25,000 |
-| RMSE   | < SGD 40,000 |
-| MAPE   | < 5%         |
-| R²     | > 0.96       |
-
-
-### 12.3 Hyperparameter Tuning (Optuna)
+The backend uses `functools.lru_cache` to load model artifacts from GCS **once per process lifetime** — subsequent prediction calls reuse the in-memory objects with zero I/O.
 
 ```python
-import optuna
+# backend/app/model_loader.py — v4 artifact loaders (outline)
 
-def objective(trial):
-    params = {
-        "num_leaves":        trial.suggest_int("num_leaves", 31, 255),
-        "learning_rate":     trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-        "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
-        "subsample":         trial.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.5, 1.0),
-        "reg_alpha":         trial.suggest_float("reg_alpha", 1e-3, 10, log=True),
-        "reg_lambda":        trial.suggest_float("reg_lambda", 1e-3, 10, log=True),
-    }
-    m = lgb.LGBMRegressor(n_estimators=500, **params, random_state=42)
-    m.fit(X_train, y_train, eval_set=[(X_val, y_val)],
-          callbacks=[lgb.early_stopping(30)])
-    return mean_absolute_error(np.expm1(y_val), np.expm1(m.predict(X_val)))
-
-study = optuna.create_study(direction="minimize")
-study.optimize(objective, n_trials=100)
-print("Best params:", study.best_params)
-```
-
----
-
-## 13. Feature Engineering
-
-
-| Derived Feature         | Source                | Formula                                  |
-| ----------------------- | --------------------- | ---------------------------------------- |
-| `storey_midpoint`       | `storey_range`        | `(low + high) / 2`                       |
-| `remaining_lease_years` | `remaining_lease`     | `years + months/12`                      |
-| `flat_age`              | `lease_commence_date` | `transaction_year - lease_commence_date` |
-| `transaction_year`      | `month`               | `pd.to_datetime().dt.year`               |
-| `transaction_month`     | `month`               | `pd.to_datetime().dt.month`              |
-| `transaction_quarter`   | `month`               | `pd.to_datetime().dt.quarter`            |
-
-
-### Geospatial Enrichment *(Phase 2)*
-
-```python
-import requests
-
-def geocode_hdb(block: str, street: str) -> dict:
-    resp = requests.get(
-        "https://www.onemap.gov.sg/api/common/elastic/search",
-        params={"searchVal": f"{block} {street} SINGAPORE",
-                "returnGeom": "Y", "getAddrDetails": "Y"}
-    )
-    results = resp.json().get("results", [])
-    if results:
-        return {"lat": float(results[0]["LATITUDE"]),
-                "lng": float(results[0]["LONGITUDE"])}
-    return {}
-```
-
----
-
-## 14. Google Cloud Storage — Artifact & Log Management
-
-### 14.1 Bucket Structure
-
-```
-gs://hdb-resale-artifacts/
-│
-├── models/
-│   ├── model.pkl              ← LightGBM trained model (latest)
-│   ├── preprocessor.pkl       ← sklearn ColumnTransformer (latest)
-│   └── metrics.json           ← Latest training metrics
-│
-├── training/
-│   └── hdb_resale_2017_2026.csv  ← Source training data
-│
-└── logs/
-    └── predictions/
-        └── YYYY/MM/DD/
-            └── pred_{timestamp}.json   ← One JSON file per prediction
-```
-
-### 14.2 GCS Access Pattern
-
-
-| Service                      | Access                    | Method                         |
-| ---------------------------- | ------------------------- | ------------------------------ |
-| `hdb-backend` (Cloud Run)    | Read `models/`            | On cold start via `lru_cache`  |
-| `hdb-backend` (Cloud Run)    | Write `logs/predictions/` | Fire-and-forget async          |
-| `training/` (local or Colab) | Read `training/*.csv`     | Load data for training         |
-| `training/` (local or Colab) | Write `models/`           | Upload artifacts post-training |
-
-
-### 14.3 GCS Client Helper
-
-```python
-# shared/gcs_client.py
-import io, joblib, json
-from google.cloud import storage
+import io
+import json
+import logging
+import os
+import tempfile
 from functools import lru_cache
+from pathlib import Path
 
-GCS_BUCKET = "hdb-resale-artifacts"
+import joblib
+import pandas as pd
+from catboost import CatBoostRegressor
+from google.cloud import storage
 
-
-def upload_pkl(obj, blob_path: str) -> None:
-    buf = io.BytesIO()
-    joblib.dump(obj, buf)
-    buf.seek(0)
-    _bucket().blob(blob_path).upload_from_file(buf, content_type="application/octet-stream")
-
-
-def download_pkl(blob_path: str):
-    buf = io.BytesIO()
-    _bucket().blob(blob_path).download_to_file(buf)
-    buf.seek(0)
-    return joblib.load(buf)
-
-
-def upload_json(data: dict, blob_path: str) -> None:
-    _bucket().blob(blob_path).upload_from_string(
-        json.dumps(data, indent=2), content_type="application/json"
-    )
+logger = logging.getLogger(__name__)
+GCS_BUCKET = os.environ.get("GCS_BUCKET", "hdb-resale-artifacts")
+MODEL_BLOB = os.environ.get("MODEL_BLOB", "models/model_v4.cbm")
+METRICS_BLOB = os.environ.get("METRICS_BLOB", "models/metrics_v4.json")
+SPATIAL_BLOB = os.environ.get("SPATIAL_BLOB", "models/spatial_inference.pkl")
+ARIMA_BLOB = os.environ.get("ARIMA_BLOB", "models/arima_bundle_v4.pkl")
+BLOCK_LOOKUP_BLOB = os.environ.get("BLOCK_LOOKUP_BLOB", "models/block_lookup.parquet")
+RPI_BLOB = os.environ.get("RPI_BLOB", "hdb_rpi.csv")
 
 
 @lru_cache(maxsize=1)
-def _bucket():
-    return storage.Client().bucket(GCS_BUCKET)
+def load_model() -> CatBoostRegressor:
+    """Load ``model_v4.cbm`` from GCS or ``BACKEND_ARTIFACT_DIR``."""
+
+
+@lru_cache(maxsize=1)
+def load_inference_metrics() -> dict:
+    """``metrics_v4.json`` — canonical ``features`` order + CatBoost indices."""
+
+
+@lru_cache(maxsize=1)
+def load_arima_bundle():
+    """Unpickled ``ARIMABundle`` (``arima_seg_vs_global``, ``arima_seg_series_std``)."""
+
+
+@lru_cache(maxsize=1)
+def load_spatial_bundle() -> dict:
+    """``spatial_inference.pkl`` KDTree neighbourhood encodings."""
+
+
+@lru_cache(maxsize=1)
+def load_block_lookup() -> pd.DataFrame:
+    """Town / block / street defaults merged during ``build_inference_pool``."""
+
+
+@lru_cache(maxsize=1)
+def load_rpi_quarters_df() -> pd.DataFrame:
+    """Official quarterly HDB RPI series for macro joins."""
 ```
 
-### 14.4 IAM Permissions Required
+
+### 6.4 Cache Sizing Guidelines
+
+
+| Concurrent Sessions | Recommended `maxsize` | Avg Memory |
+| ------------------- | --------------------- | ---------- |
+| < 100               | 200                   | ~20 MB     |
+| 100 – 500           | 500 (default)         | ~50 MB     |
+| 500 – 2,000         | 2000                  | ~200 MB    |
+| > 2,000             | Use Cloud Memorystore | N/A        |
+
+
+---
+## 7. ML Pipeline — Data, Model & Training
+
+### 7.1 Prerequisites
+
+- Run commands from the **repository root**.
+- Create **`.env`** in the repo root with **`DATAGOV_API_KEY`** (see [data.gov.sg](https://data.gov.sg/) API registration). Several scripts exit if this is missing (**[`scripts/utils.py`](scripts/utils.py)**).
+- **OneMap** (`ONEMAP_EMAIL`, `ONEMAP_PASSWORD` in `.env`) is optional but recommended: geocoding uses the public **[OneMap search API](https://www.onemap.gov.sg/)** with a JSON cache under **`data/cache/geocode_cache.json`** to limit repeated calls (**[`scripts/utils.py`](scripts/utils.py)**).
+
+### 7.2 Download raw layers (`scripts/`)
+
+These scripts write under **`data/raw/`** unless noted. Rows that use **`datagov_poll_download`** pull files through the **[data.gov.sg](https://data.gov.sg/) Open API** (`https://api-open.data.gov.sg/...`) with **`DATAGOV_API_KEY`**. Official dataset pages on data.gov.sg list the **managing agency** (e.g. LTA, HDB, MOE); the table below summarises the usual custodian and the **dataset id** embedded in each script.
+
+**Geocoding (scripts 2 & 4):** addresses / postcodes are resolved with the public **[OneMap](https://www.onemap.gov.sg/)** search API (**SLA** / government location service), not via data.gov.sg file download.
+
+| Step | Script | Primary source | Dataset / API (as in repo) | Output |
+| --- | --- | --- | --- | --- |
+| 1 | **[`scripts/1_download_bus_stops.py`](scripts/1_download_bus_stops.py)** | **[data.gov.sg](https://data.gov.sg/)** — bus-stop GeoJSON is published as government open data (**custodian typically [LTA](https://www.lta.gov.sg/)** on the dataset page) | Dataset id **`d_3f172c6feb3f4f92a2f47d93eed2908a`** → **`datagov_poll_download`** | **`data/raw/bus_stops.csv`** |
+| 2 | **[`scripts/2_download_hd_property_info.py`](scripts/2_download_hd_property_info.py)** | **[data.gov.sg](https://data.gov.sg/)** — **[HDB](https://www.hdb.gov.sg/)** inventory-style listing | Dataset id **`d_17f5382f26140b1fdae0ba2ef6239d2f`** + **OneMap** geocoding per block/street | **`data/raw/hdb_property_info_geocoded.csv`** |
+| 3 | **[`scripts/3_download_mrt_stations.py`](scripts/3_download_mrt_stations.py)** | **[data.gov.sg](https://data.gov.sg/)** — rail exit points (**custodian typically [LTA](https://www.lta.gov.sg/)**) | Dataset id **`d_b39d3a0871985372d7e1637193335da5`** (GeoJSON exits → aggregated **`mrt_stations.csv`**) | **`data/raw/mrt_stations.csv`** |
+| 4 | **[`scripts/4_download_schools.py`](scripts/4_download_schools.py)** | **[data.gov.sg](https://data.gov.sg/)** — **[MOE](https://www.moe.gov.sg/)** school directory–style listing | Dataset id **`d_688b934f82c1059ed0a6993d2a829089`** + **OneMap** postal geocode | **`data/raw/primary_schools.csv`**, **`data/raw/secondary_schools.csv`** |
+| 5 | **[`scripts/5_download_shopping_malls.py`](scripts/5_download_shopping_malls.py)** | **Not a Singapore government bulk API:** **[OpenStreetMap](https://www.openstreetmap.org/)** via **[Overpass API](https://wiki.openstreetmap.org/wiki/Overpass_API)** (`overpass-api.de`, mirror); optional fallback CSV from GitHub **`ValaryLim/Mall-Coordinates-Web-Scraper`** | OSM tags `shop=mall` inside SG bbox | **`data/raw/shopping_malls.csv`** |
+| 6 | **[`scripts/6_download_hawker_centres.py`](scripts/6_download_hawker_centres.py)** | **[data.gov.sg](https://data.gov.sg/)** — hawker-centre polygons/points ([NEA](https://www.nea.gov.sg/) is the usual agency on the dataset page) | Dataset id **`d_4a086da0a5553be1d89383cd90d07ecd`** | **`data/raw/hawker_centres_processed.csv`** |
+
+Confirm licence and attribution on each data.gov.sg dataset page before production redistribution.
+
+Example:
+
+```bash
+python scripts/1_download_bus_stops.py
+python scripts/2_download_hd_property_info.py
+python scripts/3_download_mrt_stations.py
+python scripts/4_download_schools.py
+python scripts/5_download_shopping_malls.py
+python scripts/6_download_hawker_centres.py
+```
+
+### 7.3 Combine into enriched resale CSV
+
+**[`scripts/7_build_enriched_dataset.py`](scripts/7_build_enriched_dataset.py)** downloads **HDB resale flat prices (2017 onwards)** and **HDB property information** from data.gov.sg (when not already cached), geocodes transactions, joins **building / demographic fields**, and computes **distance / proximity features** using the **`data/raw/`** amenity tables from §7.2.
+
+**Output:** **`data/hdb_resale_complete.csv`** (wide enriched table used by **`training/v4/train_v4.py`**).
+
+```bash
+python scripts/7_build_enriched_dataset.py
+```
+
+This script expects (among others) **`data/raw/bus_stops.csv`**, **`mrt_stations.csv`**, **`shopping_malls.csv`**, **`hawker_centres_processed.csv`**, **`primary_schools.csv`**, **`secondary_schools.csv`** — so run §7.2 first.
+
+### 7.4 HDB Resale Price Index (RPI)
+
+**[`scripts/9_download_hdb_rpi.py`](scripts/9_download_hdb_rpi.py)** pulls the official quarterly **HDB Resale Price Index** from data.gov.sg and saves **`data/hdb_rpi.csv`** (columns such as **`year`**, **`quarter`**, **`quarter_label`**, **`rpi`**). Training and backend load this series for **`hdb_rpi`** and interaction features.
+
+```bash
+python scripts/9_download_hdb_rpi.py
+```
+
+### 7.5 Optional: postal / town lookup helper
+
+**[`scripts/8_download_hdb.py`](scripts/8_download_hdb.py)** downloads property + resale extracts, merges town onto blocks/streets, geocodes addresses, writes **`data/raw/hdb_town_block_street_postal.csv`**. Useful as a standalone reference table; **`7_build_enriched_dataset.py`** already builds the main training file without requiring this step.
+
+### 7.6 Optional: backend `block_lookup.parquet`
+
+After **`data/hdb_resale_complete.csv`** and **`data/raw/hdb_property_info_geocoded.csv`** exist, run **`scripts/build_block_inference_lookup.py`** to build **`training/v2/artifacts/block_lookup.parquet`** (and optionally upload to GCS). The backend merges this parquet during **`build_inference_pool`** when resolving **`town` / `block` / `street_name`**.
+
+### 7.7 Feature engineering vs raw CSV
+
+Downstream training (**[`training/v4/train_v4.py`](training/v4/train_v4.py)**) and inference (**[`backend/app/inference_features.py`](backend/app/inference_features.py)**) apply **`engineer_features`**, **RPI joins**, **macro interactions**, **spatial encodings**, and **ARIMA columns** — they do **not** use the legacy sklearn **`ColumnTransformer`** stack described in older drafts.
+
+### 7.8 Time-Based Split (v4 reference)
+
+
+| Split | Calendar scope | Notes |
+| ----- | -------------- | ----- |
+| CatBoost train | `Tranc_Year` 2020–2024 | See **`training/v4/features_v4.py`** |
+| Validation | `Tranc_Year` 2025 | Early stopping |
+| Test | `Tranc_Year` 2026 | Hold-out metrics |
+| ARIMA fit history | 2017–2024 monthly series | Separate from CatBoost gradient rows |
+
+
+> ⚠️ Always use **time-based splits** — random splits leak trends and invalidate **`hdb_rpi`** / ARIMA-aligned features.
+
+---
+
+### 7.9 Production algorithm (**catboost-arima-v4**)
+
+| Piece | Implementation |
+| ----- | ---------------- |
+| Tabular regressor | **CatBoost** `CatBoostRegressor`, **`loss_function='MAE'`**, **`Pool`** with categorical column indices from **`metrics_v4.json`** |
+| Macro baseline inputs | **statsmodels** ARIMA bundle (**[`training/v4/arima_v4.py`](training/v4/arima_v4.py)**) — two columns fed to CatBoost: **`arima_seg_vs_global`**, **`arima_seg_series_std`** |
+| Spatial signals | KDTree-smoothed encodings (**`spatial_*`**) loaded from **`spatial_inference.pkl`** |
+
+Older experiments (**`training/v1/`**, **`v2/`**, **`v3/`**) may use LightGBM, older CatBoost-only pipelines, or LSTM — they are **not** what Cloud Run loads when **`MODEL_VERSION=catboost-arima-v4`**.
+
+
+Older research stacks under **`training/v1/`**–**`v3/`** are **not** loaded when **`MODEL_VERSION=catboost-arima-v4`**.
+
+---
+
+### 7.10 Entry point
+
+From repo root (after **`data/hdb_resale_complete.csv`** and **`data/hdb_rpi.csv`** exist after §§7.1–7.8 (data prep)):
+
+```bash
+python training/v4/train_v4.py
+```
+
+**[`training/v4/train_v4.py`](training/v4/train_v4.py)** loads enriched CSV + RPI, fits **`ARIMABundle`** on **2017–2024** monthly series, trains CatBoost on **`Tranc_Year` 2020–2024**, validates on **2025**, tests on **2026**, writes **`training/v4/artifacts/`** (`model_v4.cbm`, `arima_bundle_v4.pkl`, `metrics_v4.json`, `spatial_inference.pkl`, `feature_importance_v4.csv`, …) and optional MLflow logging.
+
+### 7.11 Metrics reference
+
+Latest **`training/v4/artifacts/metrics_v4.json`** holds MAE / RMSE / MAPE / R² on train, validation, and test in **SGD space** after **`expm1`**. Use it as the single source of truth after each retrain.
+
+**Aspiration targets** (same order of magnitude as original product goals):
+
+| Metric | Aim |
+| ------ | --- |
+| MAE | &lt; SGD 25k–30k on forward periods |
+| MAPE | &lt; ~5% where headline metrics allow |
+| R² | High (&gt; 0.95) on train; expect lower on cold-year test |
+
+### 7.12 Hyperparameter search
+
+**[`training/v4/hpo_v4.py`](training/v4/hpo_v4.py)** runs **Optuna** over CatBoost knobs; winning trials inform constants inside **`train_v4.py`**.
+
+---
+
+### 7.13 Input features (production v4 — CatBoost)
+
+Training and inference both use **`prepare_X`** after feature engineering so the model sees exactly **51** columns in the order recorded in **`training/v4/artifacts/metrics_v4.json`** (`features`). The numbered order below matches that JSON; **subsections group features by meaning** (transaction time, building, distances, interactions, etc.).
+
+**CatBoost categoricals** (`cat_features`): **`town`**, **`flat_type`**, **`flat_model`**, **`mrt_name`**, **`pri_sch_name`**, **`sec_sch_name`**.
+
+#### Taxonomy overview
+
+| Theme | Role |
+| ----- | ---- |
+| Transaction time | Calendar position of the resale transaction |
+| Location | HDB town |
+| Unit descriptors | Flat type, model, internal area |
+| Building / estate | Storey position, block height, completion vintage, dwelling counts, resale-type mix |
+| Lease | Remaining lease length (years and %) |
+| Storey engineering | Ratios, high-floor flag, storey bins |
+| Amenity counts | How many malls / hawkers within fixed radii |
+| Nearest POI labels | Names of nearest MRT / primary / secondary school (distance summarised separately) |
+| Distance | Log distance to nearest MRT, mall, hawker, bus, schools |
+| Accessibility & quality | Composite score from distances; primary-school quality scalar |
+| Cross interactions | Area × storey/lease; completion × area |
+| Macro (RPI) | Official HDB resale price index and interactions |
+| Spatial smoothing | KDTree neighbourhood encodings ($/sqm and total price rings) |
+| ARIMA market | Segment vs global level and segment volatility |
+
+---
+
+#### Transaction time
+
+| Feature | Notes |
+| ------- | ----- |
+| `Tranc_Year` | Transaction year (Singapore calendar, inferred row clock at inference). |
+| `tranc_period` | Month index: **`Tranc_Year × 12 + Tranc_Month`** — aligns macro and seasonal effects. |
+
+#### Location
+
+| Feature | Notes |
+| ------- | ----- |
+| `town` | One of 26 HDB towns (**categorical**). |
+
+#### Unit descriptors
+
+| Feature | Notes |
+| ------- | ----- |
+| `flat_type` | e.g. 3 ROOM, 4 ROOM (**categorical**). |
+| `flat_model` | HDB model label (**categorical**). |
+| `floor_area_sqm` | Floor area of the unit (sqm). |
+
+#### Building / block / estate stock
+
+| Feature | Notes |
+| ------- | ----- |
+| `mid_storey` | Midpoint of storey band for the unit. |
+| `max_floor_lvl` | Storeys in block (from property lookup). |
+| `year_completed` | TOP / completion vintage. |
+| `total_dwelling_units` | Units in development / precinct proxy. |
+| `2room_sold` … `exec_sold` | Count of resale transactions by flat type aggregated at block/street scale (from enriched CSV). |
+
+#### Lease
+
+| Feature | Notes |
+| ------- | ----- |
+| `lease_remaining_years` | Decimal years remaining at transaction date. |
+| `lease_remaining_pct` | Lease remaining as fraction of 99-year lease. |
+
+#### Storey engineering
+
+| Feature | Notes |
+| ------- | ----- |
+| `storey_ratio` | Unit storey position vs block height. |
+| `is_high_floor` | Binary / indicator for high bands. |
+| `floor_band` | Binned storey category from **`pd.cut`** on midpoint storey (ordinal-style encoding). |
+
+#### Amenity proximity counts (buffer rings)
+
+| Feature | Notes |
+| ------- | ----- |
+| `Mall_Within_500m`, `Mall_Within_1km`, `Mall_Within_2km` | Count of malls inside each radius. |
+| `Hawker_Within_500m`, `Hawker_Within_1km`, `Hawker_Within_2km` | Count of hawker centres inside each radius. |
+
+#### Nearest POI identities (linked to distances below)
+
+| Feature | Notes |
+| ------- | ----- |
+| `mrt_name` | Nearest MRT station label (**categorical**). |
+| `pri_sch_name` | Nearest primary school name (**categorical**). |
+| `sec_sch_name` | Nearest secondary school name (**categorical**). |
+
+#### Log distances (nearest facility)
+
+| Feature | Notes |
+| ------- | ----- |
+| `log_mrt_dist` | Log metres to nearest MRT exit centroid. |
+| `log_mall_dist` | Log metres to nearest mall. |
+| `log_hawker_dist` | Log metres to nearest hawker centre. |
+| `log_bus_dist` | Log metres to nearest bus stop. |
+| `log_pri_sch_dist` | Log metres to nearest primary school. |
+| `log_sec_sch_dist` | Log metres to nearest secondary school. |
+
+#### Accessibility & school quality
+
+| Feature | Notes |
+| ------- | ----- |
+| `accessibility_score` | Weighted mix of **log** distances: **`0.4 × log_mrt_dist + 0.2 × log_mall_dist + 0.2 × log_hawker_dist`** (**`engineer_features`**). |
+| `pri_school_quality` | **`10 × pri_sch_affiliation` (SAP proxy) + `1 / (pri_sch_nearest_distance + 1)`** — nearer affiliated schools score higher. |
+
+#### Cross interactions (unit × structure, non-RPI)
+
+| Feature | Notes |
+| ------- | ----- |
+| `area_x_storey` | **`floor_area_sqm × mid_storey`**. |
+| `area_x_lease_rem` | **`floor_area_sqm × lease_remaining_years`**. |
+| `storey_x_lease_rem` | **`mid_storey × lease_remaining_years`**. |
+| `year_completed_x_floor_area` | **`year_completed × floor_area_sqm`**. |
+
+#### Macro — HDB resale price index (RPI)
+
+| Feature | Notes |
+| ------- | ----- |
+| `hdb_rpi` | Official quarterly **HDB RPI** joined at transaction quarter (lagged as in training). |
+| `rpi_x_year` | RPI × **`Tranc_Year`**. |
+| `rpi_x_tranc_period` | RPI × **`tranc_period`**. |
+| `rpi_x_floor_area_sqm` | RPI × **`floor_area_sqm`**. |
+
+#### Spatial neighbourhood encodings (KDTree)
+
+Smoothed **target-style** signals from nearby past transactions at **500 m** and **2000 m** (training-built trees; **`spatial_inference.pkl`** at inference):
+
+| Feature | Notes |
+| ------- | ----- |
+| `spatial_500m_te`, `spatial_2000m_te` | Neighbourhood total-price encoding at radius. |
+| `spatial_500m_psm`, `spatial_2000m_psm` | Neighbourhood price-per-sqm encoding at radius. |
+
+#### ARIMA market features (`arima_features`)
+
+| Feature | Notes |
+| ------- | ----- |
+| `arima_seg_vs_global` | Segment log-level minus global log-level for transaction month (**`(town, flat_type)`** segment). |
+| `arima_seg_series_std` | Historical log-price volatility of segment (training-era constant per segment). |
+
+---
+
+**Canonical column order** for **`CatBoost.pool`** remains the **`features`** array in **`metrics_v4.json`** (not the subsection order above).
+
+**Target**: `log_resale_price = log1p(resale_price)`; inference applies **`expm1`** to the model output.
+
+
+### 7.14 Feature engineering — implementation paths
+
+All engineered columns consumed by v4 are enumerated and categorised in **§7.13**. Implementation lives in **`backend/app/inference_features.py`** (**`engineer_features`**, **`add_official_rpi`**, **`add_macro_interaction_features`**, spatial helpers) and training mirrors that path.
+
+**Raw enrichment** (distances, amenity counts, block attributes) is produced by **`scripts/7_build_enriched_dataset.py`** (§7). **Inference** does not re-run those scripts; it uses **`build_inference_pool`** plus **`block_lookup.parquet`** defaults where the user omits optional fields.
+
+
+---
+
+## 8. Google Cloud Storage — Artifact & Log Management
+
+### 8.1 Bucket structure (v4)
+
+Typical **`models/`** prefix layout (blob names configurable via env — see **`backend/app/model_loader.py`**):
+
+```
+gs://hdb-resale-artifacts/
+├── models/
+│   ├── model_v4.cbm
+│   ├── metrics_v4.json
+│   ├── arima_bundle_v4.pkl
+│   ├── spatial_inference.pkl
+│   └── block_lookup.parquet
+├── hdb_rpi.csv                    ← often at bucket root (RPI_BLOB default)
+└── logs/predictions/YYYY/MM/DD/pred_<timestamp>.json
+```
+
+Training data for local jobs stays on disk (**`data/hdb_resale_complete.csv`**); sync to GCS only if your ops pipeline requires it.
+
+### 8.2 GCS access pattern
+
+
+| Service | Access | Method |
+| ------- | ------ | ------ |
+| `hdb-backend` | Read artifact blobs | **`load_*`** helpers + **`lru_cache`** at startup |
+| `hdb-backend` | Write **`logs/predictions/`** | Async upload per prediction |
+| Developers | Upload after **`train_v4.py`** | `gsutil`, **`build_block_inference_lookup.py`** optional upload, or custom scripts |
+
+### 8.3 Client helpers
+
+Prefer **`backend/app/model_loader.py`** for downloads (CatBoost `.cbm`, JSON metrics, pickles, parquet). **[`shared/gcs_client.py`](shared/gcs_client.py)** remains available for ad-hoc uploads.
+
+### 8.4 IAM Permissions Required
 
 
 | Service Account      | Role                                | Purpose                              |
@@ -1401,161 +1373,74 @@ def _bucket():
 
 ---
 
-## 15. Google Cloud Run — Deployment
+## 9. Google Cloud Run — Deployment
 
-### 15.1 Service Configuration
+### 9.1 Services
 
-Both services are deployed as separate Cloud Run services in the same GCP project.
+| Service | Role | Notes |
+| ------- | ---- | ----- |
+| **hdb-bot** | Telegram webhook + **`python-telegram-bot`** + Gemini JSON conversation | Runs **`uvicorn main:web_app`**. Prefer **min instances ≥ 1** while sessions live in **`TTLCache`**. |
+| **hdb-backend** | **`POST /predict`**, **`GET /health`**, **`GET /meta`** | Loads CatBoost **`.cbm`**, **`metrics_v4.json`**, **`spatial_inference.pkl`**, **`arima_bundle_v4.pkl`**, parquet lookup, RPI via **`model_loader`**. Bot uses **OIDC** to call **`BACKEND_URL`** (**[`backend_client.py`](bot/services/backend_client.py)**). |
 
-#### hdb-bot (Telegram Bot + LLM Engine)
+Illustrative Knative YAML may live under **`cloud-run/`**; tune CPU/RAM against CatBoost working set.
 
-```yaml
-# cloud-run/hdb-bot.yaml
-apiVersion: serving.knative.dev/v1
-kind: Service
-metadata:
-  name: hdb-bot
-  annotations:
-    run.googleapis.com/ingress: all
-spec:
-  template:
-    metadata:
-      annotations:
-        autoscaling.knative.dev/minScale: "1"   # Keep warm — session cache must persist
-        autoscaling.knative.dev/maxScale: "1"   # Single instance for MVP (see Section 7.1)
-        run.googleapis.com/execution-environment: gen2
-    spec:
-      serviceAccountName: hdb-bot@PROJECT_ID.iam.gserviceaccount.com
-      timeoutSeconds: 30
-      containers:
-        - image: gcr.io/PROJECT_ID/hdb-bot:latest
-          resources:
-            limits:
-              cpu: "1"
-              memory: "512Mi"
-          env:
-            - name: TELEGRAM_BOT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: telegram-bot-token
-                  key: latest
-            - name: GEMINI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: gemini-api-key
-                  key: latest
-            - name: BACKEND_URL
-              value: "https://hdb-backend-xxxx-as.a.run.app"
-            - name: WEBHOOK_URL
-              value: "https://hdb-bot-xxxx-as.a.run.app/webhook"
-            - name: WEBHOOK_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: webhook-secret
-                  key: latest
-```
+### 9.2 Dockerfiles (repository)
 
-#### hdb-backend (FastAPI ML Service)
-
-```yaml
-# cloud-run/hdb-backend.yaml
-apiVersion: serving.knative.dev/v1
-kind: Service
-metadata:
-  name: hdb-backend
-  annotations:
-    run.googleapis.com/ingress: internal   # Only accessible from hdb-bot
-spec:
-  template:
-    metadata:
-      annotations:
-        autoscaling.knative.dev/minScale: "1"
-        autoscaling.knative.dev/maxScale: "3"
-        run.googleapis.com/execution-environment: gen2
-    spec:
-      serviceAccountName: hdb-backend@PROJECT_ID.iam.gserviceaccount.com
-      timeoutSeconds: 30
-      containers:
-        - image: gcr.io/PROJECT_ID/hdb-backend:latest
-          resources:
-            limits:
-              cpu: "2"
-              memory: "1Gi"     # LightGBM model may be ~100–300 MB in memory
-          env:
-            - name: GCS_BUCKET
-              value: "hdb-resale-artifacts"
-```
-
-### 15.2 Dockerfiles
-
-```dockerfile
-# bot/Dockerfile
-FROM python:3.12-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-ENV PYTHONUNBUFFERED=1
-EXPOSE 8080
-CMD ["python", "main.py"]
-```
+**Backend:** build **from repo root** (`docker build -f backend/Dockerfile … .`) so **`training/v4/arima_v4.py`** is available for unpickling.
 
 ```dockerfile
 # backend/Dockerfile
 FROM python:3.12-slim
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY training/v4/arima_v4.py ./arima_v4.py
+COPY backend/app ./app
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+```
+
+```dockerfile
+# bot/Dockerfile — context ./bot
+FROM python:3.12-slim
+WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8080
-CMD ["gunicorn", "app.main:app", \
-     "-w", "2", \
-     "-k", "uvicorn.workers.UvicornWorker", \
-     "--bind", "0.0.0.0:8080", \
-     "--timeout", "60", \
-     "--preload"]
+CMD ["uvicorn", "main:web_app", "--host", "0.0.0.0", "--port", "8080"]
 ```
 
-### 15.3 Deployment Commands (gcloud CLI)
+### 9.3 Manual deploy (`gcloud` CLI)
+
+Prefer **single-line** commands on zsh.
 
 ```bash
 export PROJECT_ID="your-gcp-project-id"
 export REGION="asia-southeast1"
-
-# ── Authenticate Docker to GCR ───────────────────────────────────
 gcloud auth configure-docker --quiet
 
-# ── Build & push images ──────────────────────────────────────────
-docker build -t gcr.io/$PROJECT_ID/hdb-backend:latest ./backend
+docker build -f backend/Dockerfile -t gcr.io/$PROJECT_ID/hdb-backend:latest .
 docker push gcr.io/$PROJECT_ID/hdb-backend:latest
 
 docker build -t gcr.io/$PROJECT_ID/hdb-bot:latest ./bot
 docker push gcr.io/$PROJECT_ID/hdb-bot:latest
 
-# ── Deploy hdb-backend ───────────────────────────────────────────
-gcloud run deploy hdb-backend --image gcr.io/$PROJECT_ID/hdb-backend:latest --region $REGION --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com --ingress internal --min-instances 1 --max-instances 3 --memory 1Gi --cpu 2 --timeout 30 --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=3.0.0,LOG_LEVEL=INFO --no-allow-unauthenticated --quiet
+gcloud run deploy hdb-backend --image gcr.io/$PROJECT_ID/hdb-backend:latest --region $REGION --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com --ingress internal --min-instances 1 --max-instances 3 --memory 1Gi --cpu 2 --timeout 30 --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=catboost-arima-v4,MODEL_BLOB=models/model_v4.cbm,METRICS_BLOB=models/metrics_v4.json,SPATIAL_BLOB=models/spatial_inference.pkl,ARIMA_BLOB=models/arima_bundle_v4.pkl,BLOCK_LOOKUP_BLOB=models/block_lookup.parquet,RPI_BLOB=hdb_rpi.csv,LOG_LEVEL=INFO --no-allow-unauthenticated --quiet
 
-# Get backend URL
 BACKEND_URL=$(gcloud run services describe hdb-backend --region $REGION --format='value(status.url)')
 
-# ── Deploy hdb-bot ───────────────────────────────────────────────
-gcloud run deploy hdb-bot --image gcr.io/$PROJECT_ID/hdb-bot:latest --region $REGION --service-account hdb-bot@$PROJECT_ID.iam.gserviceaccount.com --ingress all --min-instances 1 --max-instances 1 --memory 512Mi --cpu 1 --timeout 30 --set-secrets TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest,WEBHOOK_SECRET=webhook-secret:latest --set-env-vars "BACKEND_URL=$BACKEND_URL,WEBHOOK_URL=https://hdb-bot-xxxx-as.a.run.app/webhook,LOG_LEVEL=INFO" --allow-unauthenticated --quiet
-
-# Get bot URL and register Telegram webhook
-BOT_URL=$(gcloud run services describe hdb-bot --region $REGION --format='value(status.url)')
-
-curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" -d "url=${BOT_URL}/webhook" -d "secret_token=${WEBHOOK_SECRET}"
+gcloud run deploy hdb-bot --image gcr.io/$PROJECT_ID/hdb-bot:latest --region $REGION --service-account hdb-bot@$PROJECT_ID.iam.gserviceaccount.com --ingress all --min-instances 1 --max-instances 1 --memory 512Mi --cpu 1 --timeout 30 --set-secrets TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest,WEBHOOK_SECRET=webhook-secret:latest --set-env-vars BACKEND_URL=$BACKEND_URL,WEBHOOK_URL=https://YOUR-HDB-BOT-HOST/webhook,BACKEND_TIMEOUT_SECONDS=45,LOG_LEVEL=INFO --allow-unauthenticated --quiet
 ```
 
-> ⚠️ Run gcloud CLI commands as single lines (no backslash continuation) to avoid shell parsing errors on zsh.
+GitHub Actions may omit **`BLOCK_LOOKUP_BLOB`** / **`RPI_BLOB`** when defaults match **`model_loader.py`**.
 
-### 15.4 CI/CD Pipeline (GitHub Actions)
-
-Both jobs run in parallel on every push to `main`. Docker images are built on the GitHub Actions runner directly — this avoids Cloud Build log-streaming permission issues.
+### 9.4 CI/CD — **`.github/workflows/deploy.yml`**
 
 ```yaml
-# .github/workflows/deploy.yml
 name: Deploy to Cloud Run
 
 on:
@@ -1575,19 +1460,16 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
       - uses: google-github-actions/setup-gcloud@v2
-      - name: Configure Docker for GCR
-        run: gcloud auth configure-docker --quiet
-      - name: Build and push backend image
-        run: |
-          docker build -t gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} ./backend
+      - run: gcloud auth configure-docker --quiet
+      - run: |
+          docker build -f backend/Dockerfile -t gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} .
           docker push gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }}
-      - name: Deploy backend to Cloud Run
-        run: |
+      - run: |
           gcloud run deploy hdb-backend \
             --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
             --region $REGION \
             --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com \
-            --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=3.0.0,LOG_LEVEL=INFO \
+            --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=catboost-arima-v4,MODEL_BLOB=models/model_v4.cbm,METRICS_BLOB=models/metrics_v4.json,SPATIAL_BLOB=models/spatial_inference.pkl,ARIMA_BLOB=models/arima_bundle_v4.pkl,LOG_LEVEL=INFO \
             --quiet
 
   deploy-bot:
@@ -1598,14 +1480,11 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
       - uses: google-github-actions/setup-gcloud@v2
-      - name: Configure Docker for GCR
-        run: gcloud auth configure-docker --quiet
-      - name: Build and push bot image
-        run: |
+      - run: gcloud auth configure-docker --quiet
+      - run: |
           docker build -t gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} ./bot
           docker push gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }}
-      - name: Deploy bot to Cloud Run
-        run: |
+      - run: |
           gcloud run deploy hdb-bot \
             --image gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} \
             --region $REGION \
@@ -1615,16 +1494,16 @@ jobs:
             --quiet
 ```
 
-**Required GitHub repository secrets** (Settings → Secrets and variables → Actions):
+**GitHub Actions secrets**
 
 | Secret name | Value |
 | ----------- | ----- |
-| `GCP_PROJECT_ID` | GCP project ID string |
-| `GCP_SA_KEY` | Full JSON content of the `github-actions` service account key |
-| `BACKEND_URL` | Cloud Run URL of `hdb-backend` |
-| `WEBHOOK_URL` | Cloud Run URL of `hdb-bot` + `/webhook` |
+| `GCP_PROJECT_ID` | GCP project ID |
+| `GCP_SA_KEY` | JSON key for deployer SA |
+| `BACKEND_URL` | **`hdb-backend`** HTTPS URL |
+| `WEBHOOK_URL` | **`hdb-bot`** URL + **`/webhook`** |
 
-### 15.5 Full GCP Setup — One-Time Steps
+### 9.5 Full GCP Setup — One-Time Steps
 
 Run all commands in order before the first deployment. All `gcloud` commands must be run as single lines on zsh to avoid shell parsing errors.
 
@@ -1723,77 +1602,77 @@ rm gha-key.json
 
 ---
 
-### 15.6 Estimated Monthly Cost (GCP)
+### 9.6 Estimated Monthly Cost (GCP)
 
 
 | Resource                                     | Usage Estimate                 | Monthly Cost (SGD) |
 | -------------------------------------------- | ------------------------------ | ------------------ |
 | Cloud Run — hdb-bot (1 instance, 0.5 vCPU)   | Always-on                      | ~$8                |
 | Cloud Run — hdb-backend (1 instance, 1 vCPU) | Always-on                      | ~$15               |
-| Gemini 2.0 Flash API                         | ~1,000 sessions/mo × 4K tokens | ~$1–2              |
+| Gemini API (**`gemini-2.5-flash-lite`** in code) | Session/token dependent | Check current [Google AI pricing](https://ai.google.dev/pricing) |
 | GCS Storage                                  | ~200 MB artifacts + logs       | ~$0.10             |
 | Secret Manager                               | 3 secrets                      | ~$0.10             |
-| Cloud Build                                  | ~50 builds/mo                  | ~$0 (free tier)    |
-| **Total**                                    |                                | **~$25–30/mo**     |
+| CI builds                                    | GitHub-hosted Docker push      | Usually low / free tier |
+| **Rough total**                              |                                | **~$25–35/mo** (excluding LLM variance) |
 
 
 ---
 
-## 16. API Contract
+## 10. API Contract
 
-### 16.1 Bot ↔ LLM (Gemini)
+Schemas: **`backend/app/schemas.py`**, Gemini **`bot/llm/system_prompt.py`**, session gate **`bot/cache/session.py`**.
 
-```
-Input:  system_prompt (with collected_params injected)
-        + conversation_history (last 20 turns)
-        + current user message
+### 10.1 Bot ↔ LLM (Gemini)
 
-Output JSON:
+Runtime model: **`gemini-2.5-flash-lite`** (**[`bot/llm/engine.py`](bot/llm/engine.py)**). Response must be JSON only:
+
+```json
 {
-  "reply":            string,    // Singlish message sent to user
-  "extracted_params": {          // Newly extracted values; null = not mentioned
-    "town":                  string | null,
-    "flat_type":             string | null,
-    "flat_model":            string | null,
-    "storey_range":          string | null,
-    "floor_area_sqm":        number | null,
-    "remaining_lease_years": number | null,
-    "street_name":           string | null,
-    "block":                 string | null
+  "reply": "<Singlish>",
+  "extracted_params": {
+    "town": "<string|null>",
+    "block": "<string|null>",
+    "storey_range": "<string|null>",
+    "floor_area_sqm": "<number|null>",
+    "street_name": "<string|null>"
   },
-  "ready_to_predict": boolean,   // true only when ALL 8 params confirmed
-  "off_topic":        boolean    // true when message is unrelated to HDB
+  "ready_to_predict": true,
+  "off_topic": false
 }
 ```
 
-### 16.2 Bot → Backend `POST /predict`
+**Required for `/predict`:** **`town`**, **`block`**, **`storey_range`**, **`floor_area_sqm`**. **`street_name`** optional. **`flat_type` / `flat_model` / `remaining_lease_years`** come from **`block_lookup`** when omitted.
+
+### 10.2 Bot → Backend `POST /predict`
 
 
-| Field                   | Type   | Validation                        |
-| ----------------------- | ------ | --------------------------------- |
-| `town`                  | string | One of 26 valid towns (uppercase) |
-| `flat_type`             | string | One of 7 valid types              |
-| `flat_model`            | string | One of 21 valid models            |
-| `storey_range`          | string | Format `NN TO NN`                 |
-| `floor_area_sqm`        | float  | 20.0 – 300.0                      |
-| `remaining_lease_years` | float  | 0.0 – 99.0                        |
-| `street_name`           | string | Non-empty                         |
-| `block`                 | string | Alphanumeric                      |
+| Field                   | Required | Notes |
+| ----------------------- | -------- | ----- |
+| `town`                  | Yes | Uppercase HDB town |
+| `block`                 | Yes | Block id incl. suffix |
+| `storey_range`          | Yes | Canonical band; **`schemas`** maps shorthand / qualitative bands |
+| `floor_area_sqm`        | Yes | 20–300 |
+| `street_name`           | No | Helps fuzzy street resolution |
+| `flat_type`             | No | Lookup default |
+| `flat_model`            | No | Lookup default |
+| `remaining_lease_years` | No | Lookup default |
 
 
-### 16.3 Backend Response `200 OK`
+### 10.3 Backend Response `200 OK`
 
 ```json
 {
   "predicted_price": 650000,
   "price_range":     { "low": 617000, "high": 683000 },
   "confidence":      "medium",
-  "model_version":   "3.0.0",
-  "input_echo":      { "town": "TAMPINES", ... }
+  "model_version":   "catboost-arima-v4",
+  "input_echo":      { }
 }
 ```
 
-### 16.4 HTTP Status Codes
+**`model_version`** reflects **`MODEL_VERSION`** env.
+
+### 10.4 HTTP Status Codes
 
 
 | Code                        | Meaning                       |
@@ -1806,30 +1685,36 @@ Output JSON:
 
 ---
 
-## 17. Environment & Configuration
+## 11. Environment & Configuration
 
-### 17.1 Environment Variables
+### 11.1 Environment Variables
 
 ```env
-# hdb-bot (Cloud Run env + Secret Manager)
-TELEGRAM_BOT_TOKEN=<from Secret Manager>
-GEMINI_API_KEY=<from Secret Manager>
+# hdb-bot — secrets via Secret Manager on Cloud Run
+TELEGRAM_BOT_TOKEN=
+GEMINI_API_KEY=
+WEBHOOK_SECRET=
 BACKEND_URL=https://hdb-backend-xxxx-as.a.run.app
 WEBHOOK_URL=https://hdb-bot-xxxx-as.a.run.app/webhook
-WEBHOOK_SECRET=<from Secret Manager>
+BACKEND_TIMEOUT_SECONDS=45
 SESSION_MAXSIZE=500
 SESSION_TTL=3600
 LOG_LEVEL=INFO
-PORT=8080
 
-# hdb-backend (Cloud Run env)
+# hdb-backend — artifact blobs (defaults match model_loader.py)
 GCS_BUCKET=hdb-resale-artifacts
-MODEL_VERSION=3.0.0
+MODEL_VERSION=catboost-arima-v4
+MODEL_BLOB=models/model_v4.cbm
+METRICS_BLOB=models/metrics_v4.json
+SPATIAL_BLOB=models/spatial_inference.pkl
+ARIMA_BLOB=models/arima_bundle_v4.pkl
+BLOCK_LOOKUP_BLOB=models/block_lookup.parquet
+RPI_BLOB=hdb_rpi.csv
+# BACKEND_ARTIFACT_DIR=/local/path   # dev only — skip GCS when files exist
 LOG_LEVEL=INFO
-PORT=8080
 ```
 
-### 17.2 Secrets Management (GCP Secret Manager)
+### 11.2 Secrets Management (GCP Secret Manager)
 
 All sensitive values are stored in **GCP Secret Manager** and injected at runtime via Cloud Run's secret binding — never baked into Docker images or `.env` files.
 
@@ -1847,141 +1732,97 @@ gcloud secrets add-iam-policy-binding telegram-bot-token \
 
 ---
 
-## 18. Tech Stack Summary
+## 12. Tech Stack Summary
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    FULL TECH STACK (v3.0)                        │
-├──────────────────────┬───────────────────────────────────────────┤
-│ Layer                │ Technology                                 │
-├──────────────────────┼───────────────────────────────────────────┤
-│ Bot Interface        │ Python 3.12, python-telegram-bot v21       │
-│ LLM Engine           │ Google Gemini 2.0 Flash (google-genai SDK) │
-│ Singlish Prompts     │ Dynamic system prompt injection             │
-│ Session Cache        │ cachetools.TTLCache (in-process, maxsize=500, ttl=3600) │
-│ Model Artifact Cache │ functools.lru_cache (in-process, load-once) │
-│ Backend API          │ FastAPI 0.111+, Uvicorn, Gunicorn           │
-│ API Validation       │ Pydantic v2                                 │
-│ ML Training          │ scikit-learn, LightGBM, XGBoost, CatBoost  │
-│ HPO                  │ Optuna                                      │
-│ Feature Encoding     │ category_encoders (TargetEncoder)           │
-│ Serialization        │ joblib                                      │
-│ Data Wrangling       │ pandas, numpy                               │
-│ Artifact Storage     │ Google Cloud Storage (GCS)                  │
-│ Prediction Logs      │ GCS JSONL files (no DB needed)              │
-│ Secrets              │ GCP Secret Manager                          │
-│ Container Registry   │ Google Container Registry (GCR)             │
-│ Deployment           │ Google Cloud Run (serverless)               │
-│ CI/CD                │ GitHub Actions + gcloud CLI                 │
-│ Monitoring           │ Cloud Run built-in metrics + Cloud Logging  │
-└──────────────────────┴───────────────────────────────────────────┘
-```
+| Layer | Technology |
+| ----- | ---------- |
+| Bot | Python 3.12, **python-telegram-bot**, FastAPI **`web_app`** + **`uvicorn`**, **`httpx`** + Google **OIDC** to backend |
+| LLM | **`google-generativeai`**, **`gemini-2.5-flash-lite`**, JSON system prompts |
+| Session | **cachetools.TTLCache** (in-process) |
+| Backend | **FastAPI**, **Uvicorn**, **Pydantic v2** |
+| Inference | **CatBoost** `.cbm`, **CatBoost Pool**, **`np.expm1`** on log target |
+| Macro / spatial | **statsmodels** ARIMA bundle (pickle), **joblib/spatial** KDTree pickles, **pandas** / **numpy** |
+| Training | **`training/v4/train_v4.py`**, **Optuna** **`hpo_v4.py`**, optional **MLflow** |
+| Data pipeline | **`scripts/`** → **`data/hdb_resale_complete.csv`**, **`data/hdb_rpi.csv`** |
+| Artifacts | **GCS**, **`model_loader`** + **`lru_cache`** |
+| Secrets / deploy | **GCP Secret Manager**, **GitHub Actions**, **Cloud Run**, **GCR** |
 
 ---
 
-## 19. Project Structure
+## 13. Project Structure
 
 ```
 hdb-resale-bot/
-│
-├── bot/                              # Cloud Run: hdb-bot
-│   ├── main.py                       # Entry point — webhook + message router
+├── bot/
+│   ├── main.py                 # Telegram + FastAPI webhook app (uvicorn main:web_app)
 │   ├── llm/
-│   │   ├── engine.py                 # Gemini API client, process_message()
-│   │   ├── gemini_client.py          # GenerativeModel config + safety settings
-│   │   └── system_prompt.py          # Dynamic Singlish system prompt builder
-│   ├── cache/
-│   │   └── session.py                # SessionCache (cachetools.TTLCache)
-│   ├── services/
-│   │   └── backend_client.py         # httpx async client → /predict
+│   ├── cache/session.py
+│   ├── services/backend_client.py
 │   ├── guards/
-│   │   └── topic_check.py            # Keyword pre-filter guardrail
-│   ├── constants.py                  # VALID_TOWNS, FLAT_TYPES, FLAT_MODELS
-│   ├── requirements.txt
-│   └── Dockerfile
-│
-├── backend/                          # Cloud Run: hdb-backend
+│   ├── constants.py
+│   ├── Dockerfile
+│   └── requirements.txt
+├── backend/
 │   ├── app/
-│   │   ├── main.py                   # FastAPI app, /predict /health /meta
-│   │   ├── schemas.py                # Pydantic request/response models
-│   │   ├── model_loader.py           # GCS download + lru_cache
-│   │   ├── preprocessing.py          # Feature engineering at inference
-│   │   └── constants.py              # Shared domain constants
-│   ├── requirements.txt
-│   └── Dockerfile
-│
-├── training/                         # Run locally or on Colab / Vertex AI
-│   ├── train.py                      # Training pipeline (reads/writes GCS)
-│   ├── preprocessing.py              # Feature engineering (shared with backend)
-│   ├── evaluate.py                   # Metrics + SHAP analysis
-│   ├── hpo.py                        # Optuna HPO
+│   │   ├── main.py
+│   │   ├── schemas.py
+│   │   ├── model_loader.py
+│   │   ├── preprocessing.py      # build_inference_pool
+│   │   ├── inference_features.py # shared feature logic with training
+│   │   └── constants.py
+│   ├── Dockerfile                # build from repo root
+│   └── requirements.txt
+├── training/
+│   ├── v4/                       # Production CatBoost + ARIMA
+│   │   ├── train_v4.py
+│   │   ├── arima_v4.py
+│   │   ├── features_v4.py
+│   │   ├── hpo_v4.py
+│   │   └── artifacts/
+│   ├── v1/, v2/, v3/, …          # Historical experiments
 │   └── notebooks/
-│       ├── 01_eda.ipynb
-│       ├── 02_feature_engineering.ipynb
-│       └── 03_model_selection.ipynb
-│
-├── shared/
-│   └── gcs_client.py                 # Shared GCS upload/download helpers
-│
-├── cloud-run/
-│   ├── hdb-bot.yaml                  # Cloud Run service spec
-│   └── hdb-backend.yaml              # Cloud Run service spec
-│
-├── .github/
-│   └── workflows/
-│       └── deploy.yml                # GitHub Actions CI/CD
-│
-├── .env.example                      # Example env vars (no secrets)
-├── .gitignore
-└── README.md
+├── scripts/                      # Raw downloads + enriched CSV (§7)
+├── data/                         # hdb_resale_complete.csv, hdb_rpi.csv, raw/, cache/
+├── shared/gcs_client.py
+├── cloud-run/                    # Optional reference YAML
+├── .github/workflows/deploy.yml
+├── README.md
+└── .gitignore
 ```
 
 ---
 
-## 20. Development Roadmap
+## 14. Development Roadmap
 
-### Phase 1 — GCP-Native MVP (Weeks 1–4)
+### Phase 1 — GCP-native MVP *(substantially delivered)*
 
-- Set up GCP project, service accounts, GCS bucket structure
-- Configure GCP Secret Manager with Telegram + Gemini keys
-- Implement SessionCache with `cachetools.TTLCache`
-- Build LLM engine with Gemini 2.0 Flash + Singlish system prompt
-- Implement topic guardrail (keyword pre-filter + Gemini enforcement)
-- Build FastAPI backend with GCS model loading + `lru_cache`
-- Train baseline LightGBM, upload artifacts to GCS
-- Build Docker images, deploy both services to Cloud Run
-- Register Telegram webhook → Cloud Run URL
-- End-to-end integration test: chat → Gemini → backend → Singlish reply
+- Cloud Run **hdb-bot** + **hdb-backend**, Secret Manager, GCS **v4** artifacts
+- **SessionCache**, Gemini **`gemini-2.5-flash-lite`**, topic guardrail
+- **CatBoost + ARIMA** inference path, **`build_inference_pool`**, **`model_loader`**
+- **`training/v4/train_v4.py`** + **`deploy.yml`** (backend image from repo root)
+- Telegram webhook + OIDC **`call_predict`**
 
-### Phase 2 — Quality & Accuracy (Weeks 5–8)
+### Phase 2 — Quality & accuracy
 
-- Optuna HPO for LightGBM; benchmark CatBoost
-- Add geospatial features via OneMap API geocoding
-- Gemini prompt refinement — more Singlish variety, edge-case handling
-- Prediction JSONL logs analysis in GCS (Google Colab / BigQuery)
-- `/history` — summarise user's past queries (read from GCS logs)
+- Refresh **`train_v4`** / **`hpo_v4`** as new resale quarters arrive; monitor **`metrics_v4.json`** vs realised prices
+- Prompt tuning for ambiguous towns/streets; richer Singlish coverage
+- **`/history`** or analytics from **`logs/predictions/`**
 
-### Phase 3 — Production Hardening (Weeks 9–12)
+### Phase 3 — Production hardening
 
-- Cloud Run request rate limiting (per Telegram user_id)
-- Model versioning in GCS (`models/v1/`, `models/v2/`) + version env var
-- Cloud Monitoring dashboard (latency, error rate, Gemini token cost)
-- Cloud Logging structured JSON logs for all prediction events
-- Automated retraining trigger (Cloud Scheduler → Cloud Build → GCS upload)
-- Model drift detection (compare monthly MAPE on new transactions)
-- Graceful fallback if Gemini API down → simple keyword FSM mode
+- Optional rate limiting per Telegram **`user_id`**
+- Artifact versioning prefixes + **`MODEL_VERSION`** discipline
+- Dashboards (latency, errors, Gemini spend); structured logging
+- Scheduled retrain / drift workflows *(architecture choice TBD)*
 
-### Phase 4 — Advanced (Future)
+### Phase 4 — Advanced *(future)*
 
-- SHAP explainability: "Wah why so expensive? Because high floor + near MRT lor"
-- Comparable sales: "Here got 3 similar flats sold recently" (query GCS logs)
-- Price trend sparkline chart per town (matplotlib → Telegram image)
-- Mandarin / Malay code-switching (rojak style bilingual Singlish)
-- Vertex AI Model Registry for governed model lifecycle management
+- Explainability (“why this price”), comparable sales UX, richer multilingual tone
+- Optional Vertex AI registry / governed promotion flows
 
 ---
 
-*End of Technical Implementation Guidelines — v3.0*
+*End of Technical Implementation Guidelines — revised for **`catboost-arima-v4`** (repository-aligned).*
 
 ---
 
@@ -1989,5 +1830,5 @@ hdb-resale-bot/
 >
 > **GCP Region**: Deploy to `asia-southeast1` (Singapore) for lowest latency to local users and data residency compliance.
 >
-> **Gemini Cost Estimate**: ~~4,000 tokens/session × 1,000 sessions/month = ~4M tokens/mo. At Gemini 2.0 Flash pricing (~~$0.075/1M input tokens), cost ≈ **< $1/month** for moderate usage.
+> **Gemini pricing**: Use current [Google AI pricing](https://ai.google.dev/pricing) for **`gemini-2.5-flash-lite`** at your traffic level.
 
