@@ -1,6 +1,7 @@
 # Training + notebooks — ML pins MUST match backend/requirements.txt (pickles, CatBoost, NumPy 2).
+# pandas 2.3+: unpickle compat for StringDtype(storage, na_value). pandas 3 conflicts with mlflow (pandas<3).
 numpy==2.2.2
-pandas==3.0.2
+pandas==2.3.3
 scipy==1.14.1
 statsmodels==0.14.4
 pyarrow==18.1.0

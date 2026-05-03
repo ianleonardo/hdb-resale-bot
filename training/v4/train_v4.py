@@ -40,17 +40,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pickle
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import joblib
 import mlflow
 import numpy as np
 import pandas as pd
 from catboost import CatBoostRegressor, Pool
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 _REPO_ROOT   = Path(__file__).resolve().parents[2]
 _BACKEND_DIR = _REPO_ROOT / "backend"
@@ -123,6 +122,18 @@ def split_data(df: pd.DataFrame):
     return train, val, test
 
 
+def _mse_np(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(np.mean((y_true - y_pred) ** 2))
+
+
+def _r2_np(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    ss_res = float(np.sum((y_true - y_pred) ** 2))
+    ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
+    if ss_tot == 0.0:
+        return 1.0 if ss_res == 0.0 else 0.0
+    return 1.0 - ss_res / ss_tot
+
+
 def _add_arima_cols(df: pd.DataFrame, bundle: ARIMABundle) -> pd.DataFrame:
     feats = bundle.get_arima_features(df)
     df = df.copy()
@@ -132,14 +143,15 @@ def _add_arima_cols(df: pd.DataFrame, bundle: ARIMABundle) -> pd.DataFrame:
 
 
 def evaluate(name: str, model: CatBoostRegressor, pool: Pool, y_log: pd.Series) -> dict:
-    pred_log = model.predict(pool)
+    pred_log = np.asarray(model.predict(pool), dtype=np.float64)
+    y_log_np = np.asarray(y_log.to_numpy(), dtype=np.float64)
     pred     = np.expm1(pred_log)
-    true     = np.expm1(y_log.to_numpy())
-    mae      = float(mean_absolute_error(true, pred))
-    rmse     = float(np.sqrt(mean_squared_error(true, pred)))
+    true     = np.expm1(y_log_np)
+    mae      = float(np.mean(np.abs(true - pred)))
+    rmse     = float(np.sqrt(_mse_np(true, pred)))
     mape     = float(np.mean(np.abs((true - pred) / true)) * 100)
-    r2       = float(r2_score(true, pred))
-    log_rmse = float(np.sqrt(mean_squared_error(y_log.to_numpy(), pred_log)))
+    r2       = float(_r2_np(true, pred))
+    log_rmse = float(np.sqrt(_mse_np(y_log_np, pred_log)))
     logger.info(
         "%s: MAE=%s | RMSE=%s | MAPE=%.2f%% | R²=%.4f | log_RMSE=%.6f",
         name, f"{mae:,.0f}", f"{rmse:,.0f}", mape, r2, log_rmse,
@@ -181,7 +193,8 @@ def main():
     t0 = time.perf_counter()
     bundle_spatial  = build_spatial_bundle_dict(train_df)
     spatial_path    = LOCAL_ARTIFACTS / "spatial_inference.pkl"
-    joblib.dump(bundle_spatial, spatial_path)
+    with open(spatial_path, "wb") as _sf:
+        pickle.dump(bundle_spatial, _sf, protocol=pickle.HIGHEST_PROTOCOL)
     tr_sp, val_sp, te_sp = compute_spatial_features(train_df, val_df, test_df)
     for feat, vals in tr_sp.items():
         train_df[feat] = vals
