@@ -7,7 +7,6 @@ Key differences from train_v2.py (LightGBM):
   - Saves model_catboost.cbm (CatBoost native format) + comp_lookup.pkl.
 """
 
-import io
 import json
 import logging
 from datetime import datetime, timezone
@@ -29,16 +28,14 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GCS_BUCKET      = "hdb-resale-artifacts"
-DATA_BLOB       = "training/Resaleflatpricesbase.csv"
+DATA_PATH       = Path(__file__).resolve().parents[2] / "data" / "Resaleflatpricesbase.csv"
 LOCAL_ARTIFACTS = Path("artifacts/")
 LOCAL_ARTIFACTS.mkdir(exist_ok=True)
 
 
 def load_data() -> pd.DataFrame:
-    logger.info(f"Loading data from gs://{GCS_BUCKET}/{DATA_BLOB}")
-    gcs = storage.Client()
-    csv_bytes = gcs.bucket(GCS_BUCKET).blob(DATA_BLOB).download_as_bytes()
-    df = pd.read_csv(io.BytesIO(csv_bytes))
+    logger.info(f"Loading data from {DATA_PATH}")
+    df = pd.read_csv(DATA_PATH, low_memory=False)
     logger.info(f"Loaded {len(df)} rows | date range: {df['month'].min()} – {df['month'].max()}")
     return df
 

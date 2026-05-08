@@ -47,6 +47,7 @@ from features_v3 import (  # noqa: E402
     RPI_PATH,
     SEQ_LEN,
     TARGET,
+    add_postal_sector,
     apply_preprocessors,
     build_monthly_agg,
     build_sequences,
@@ -89,9 +90,10 @@ def _prepare_fold(raw_full: pd.DataFrame, val_year: int) -> dict | None:
     mall_med = train_raw["Mall_Nearest_Distance"].median()
 
     def _fe(df):
-        return add_macro_interaction_features(add_official_rpi(
-            engineer_features(df, mall_med), RPI_PATH
-        ))
+        df = engineer_features(df, mall_med)
+        df = add_official_rpi(df, RPI_PATH)
+        df = add_macro_interaction_features(df)
+        return add_postal_sector(df)
 
     train_df = _fe(train_raw)
     val_df   = _fe(val_raw)

@@ -2,9 +2,10 @@
 model_lstm_v3.py — Hybrid LSTM + static MLP model for HDB resale price prediction.
 
 Architecture:
-  LSTM branch  : encodes SEQ_LEN months of per-(town, flat_type) market statistics
-                 → temporal market context embedding
-  Static branch: encodes engineered property features + categorical embeddings
+  LSTM branch  : encodes SEQ_LEN months of market statistics; timeline follows
+                 (town, flat_type) months, with sector-month rows substituted when
+                 sector-(flat_type) has enough volume (hybrid fallback to town).
+  Static branch: engineered numerics + categorical embeddings (incl. postal_sector)
                  → property context embedding
   Fusion head  : concatenates both embeddings → log_resale_price
 

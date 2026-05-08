@@ -5,8 +5,8 @@ Pipeline:
   1. Load raw CSV; split 2017-2024 train / 2025 val / 2026 test.
   2. Engineer property features (reuses v2 backend functions).
   3. Build KDTree spatial features (same as v2).
-  4. Build monthly market aggregates + LSTM sequences (new in v3).
-  5. Fit StandardScaler + OrdinalEncoder on training data.
+  4. Build monthly market aggregates (town + postal-sector) + hybrid LSTM sequences.
+  5. Fit StandardScaler + OrdinalEncoder on training data (includes postal_sector cat).
   6. Train hybrid LSTM+MLP model with AdamW + cosine LR + early stopping.
   7. Evaluate and save artifacts.
 
@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
+import pickle
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
-import joblib
 import mlflow
 import numpy as np
 import pandas as pd
@@ -67,6 +67,7 @@ from features_v3 import (  # noqa: E402
     VAL_YEAR,
     TEST_YEAR_START,
     TEST_YEAR_END,
+    add_postal_sector,
     apply_preprocessors,
     build_monthly_agg,
     build_sequences,
@@ -252,7 +253,8 @@ def main(config_override: dict | None = None) -> tuple:
     def _prep_features(df):
         df = engineer_features(df, mall_dist_median)
         df = add_official_rpi(df, RPI_PATH)
-        return add_macro_interaction_features(df)
+        df = add_macro_interaction_features(df)
+        return add_postal_sector(df)
 
     train_df = _prep_features(raw_train)
     val_df   = _prep_features(raw_val)
@@ -265,7 +267,8 @@ def main(config_override: dict | None = None) -> tuple:
     t0 = time.perf_counter()
     bundle       = build_spatial_bundle_dict(train_df)
     spatial_path = LOCAL_ARTIFACTS / "spatial_inference.pkl"
-    joblib.dump(bundle, spatial_path)
+    with open(spatial_path, "wb") as _sf:
+        pickle.dump(bundle, _sf, protocol=pickle.HIGHEST_PROTOCOL)
     tr_sp, val_sp, te_sp = compute_spatial_features(train_df, val_df, test_df)
     for feat, vals in tr_sp.items():
         train_df[feat] = vals
@@ -307,7 +310,8 @@ def main(config_override: dict | None = None) -> tuple:
 
     prep_out  = {**prep, "monthly_agg": monthly_agg, "mall_dist_median": float(mall_dist_median)}
     prep_path = LOCAL_ARTIFACTS / "preprocessor_v3.pkl"
-    joblib.dump(prep_out, prep_path)
+    with open(prep_path, "wb") as _pf:
+        pickle.dump(prep_out, _pf, protocol=pickle.HIGHEST_PROTOCOL)
     logger.info("Saved preprocessor -> %s", prep_path)
 
     # ── 6. DataLoaders ─────────────────────────────────────────────────────────
@@ -315,6 +319,12 @@ def main(config_override: dict | None = None) -> tuple:
     train_loader = DataLoader(
         HDBDataset(tr_seq_s,  tr_static,  tr_cats,  y_train),
         batch_size=batch_size, shuffle=True,  num_workers=0,
+        collate_fn=collate_fn, pin_memory=pin,
+    )
+    # Same data as train_loader but shuffle=False so preds align with y_train for metrics
+    train_eval_loader = DataLoader(
+        HDBDataset(tr_seq_s, tr_static, tr_cats, y_train),
+        batch_size=batch_size, shuffle=False, num_workers=0,
         collate_fn=collate_fn, pin_memory=pin,
     )
     val_loader = DataLoader(
@@ -347,7 +357,7 @@ def main(config_override: dict | None = None) -> tuple:
     logger.info("Model: %d trainable parameters", n_params)
 
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=lr * 0.01)
+    scheduler = CosineAnnealingLR(optimizer, T_max=40, eta_min=lr * 0.01)
     criterion = nn.L1Loss()  # MAE on log target (consistent with v2 CatBoost MAE loss)
 
     # ── 8. Training loop ───────────────────────────────────────────────────────
@@ -428,7 +438,7 @@ def main(config_override: dict | None = None) -> tuple:
         model.load_state_dict(best_state)
 
         # ── 9. Evaluation ──────────────────────────────────────────────────────
-        _, tr_preds  = eval_epoch(model, train_loader, criterion, device)
+        _, tr_preds  = eval_epoch(model, train_eval_loader, criterion, device)
         _, val_preds = eval_epoch(model, val_loader,   criterion, device)
         _, te_preds  = eval_epoch(model, test_loader,  criterion, device)
 

@@ -175,3 +175,24 @@ Together they implement: **ARIMA summarizes the temporal envelope of the market;
 - **RPI ARIMA not in training features** — CatBoost never sees **`arima_rpi_forecast`** during training, so if the backend swaps in ARIMA-extended RPI at inference, behaviour is **distribution-shift** relative to training unless you retrain or align that path deliberately.
 
 - **Extra training time and CPU** — Fitting many segment ARIMAs plus CatBoost HPO/training adds wall-clock vs a single tree-only pipeline (though segment grids are intentionally small).
+
+---
+
+## 9. Example training metrics (reference run)
+
+Snapshot from **`train_v4.py`** with splits **train 2020–2024**, **val 2025**, **test 2026** (`features_v4.py`), CatBoost **early stopping** on validation MAE (`use_best_model=True`):
+
+```
+Training done: 39.30s | best iter=2176
+
+Train:       MAE=16,464 | RMSE=24,111 | MAPE=3.13% | R²=0.9805 | log_RMSE=0.044199
+Validation:  MAE=26,236 | RMSE=38,668 | MAPE=3.89% | R²=0.9618 | log_RMSE=0.052578
+Test:        MAE=29,584 | RMSE=44,985 | MAPE=4.42% | R²=0.9525 | log_RMSE=0.060948
+```
+
+### Reading these numbers
+
+- **`best iter=2176`** — best checkpoint by **val MAE** (on log target); wall-clock **~39 s** here includes training only (feature + ARIMA fit times are logged separately in the full pipeline).
+- **Train vs val** — Train MAE is **lower** than val (typical for boosted trees on the fit split). Metrics use **`expm1`** on predictions and labels for dollar MAE/RMSE/MAPE/R²; **log_RMSE** is on **`log_resale_price`**.
+- **Val → test (2025 → 2026)** — Small degradation (e.g. test MAE **~29.6k** vs val **~26.2k**, MAPE **~4.4%** vs **~3.9%**) is normal **forward-year** behaviour; **R²** stays **~0.95+** on test.
+- **Comparison anchor** — Use the same CSV splits when comparing to **v3 LSTM** or other baselines; absolute MAE depends on data volume and year mix.

@@ -6,9 +6,10 @@ Adds monthly market aggregate computation and LSTM sequence construction.
 
 Key additions vs v2:
   - Sequence history loads 2017-2024 for monthly_agg; model fitting uses 2020-2024.
-  - `build_monthly_agg`: per-(town, flat_type, year, month) market statistics.
-  - `build_sequences`: for each transaction, look up the last SEQ_LEN months of segment
-    stats strictly before the transaction month (no temporal leakage).
+  - `build_monthly_agg`: town-level + sector-level monthly tables (sector = postal // 10000).
+  - `build_sequences`: primary series is still (town, flat_type); when sector-month has
+    enough transactions (>= MIN_TXN_COUNT_FOR_SECTOR_SEQ), that timestep uses sector
+    stats instead (safer hybrid). Plus `postal_sector` categorical for the static branch.
   - `fit_preprocessors` / `apply_preprocessors`: StandardScaler for static and sequence
     features, OrdinalEncoder for categoricals (embedding-ready).
 """
@@ -53,6 +54,9 @@ TEST_YEAR_END    = 2026
 # ── Sequence config ─────────────────────────────────────────────────────────────
 SEQ_LEN = 12  # months of lookback for LSTM
 
+# Sector-month cell must have at least this many txns to replace town-month in the sequence.
+MIN_TXN_COUNT_FOR_SECTOR_SEQ = 3
+
 # 7 per-month market features; each row covers one (town, flat_type, year, month) cell.
 SEQ_FEATURES = [
     "log_mean_price",   # mean log1p(resale_price) for this segment-month
@@ -66,7 +70,11 @@ SEQ_FEATURES = [
 N_SEQ_FEATURES = len(SEQ_FEATURES)
 
 # ── Feature lists ────────────────────────────────────────────────────────────────
-CAT_FEATURES = ["flat_type", "flat_model", "town", "mrt_name", "pri_sch_name", "sec_sch_name"]
+CAT_FEATURES = [
+    "flat_type", "flat_model", "town",
+    "postal_sector",
+    "mrt_name", "pri_sch_name", "sec_sch_name",
+]
 
 STATIC_NUM_FEATURES = [
     "Tranc_Year", "floor_area_sqm", "mid_storey", "max_floor_lvl",
@@ -87,6 +95,57 @@ STATIC_NUM_FEATURES = [
 N_STATIC = len(STATIC_NUM_FEATURES)  # 43
 
 TARGET = "log_resale_price"
+
+
+def add_postal_sector(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Postal sector (Singapore): first two digits of 6-digit postal / 10000.
+    String for OrdinalEncoder; \"UNK\" when postal missing or invalid.
+    """
+    df = df.copy()
+    p = pd.to_numeric(df["postal"], errors="coerce").to_numpy(dtype=float)
+    sec = np.full(len(p), -1, dtype=np.int64)
+    valid = np.isfinite(p)
+    sec[valid] = np.floor_divide(p[valid], 10000.0).astype(np.int64)
+    df["postal_sector"] = np.where(sec >= 0, sec.astype(str), "UNK")
+    return df
+
+
+def _apply_rpi_and_seasonal(agg: pd.DataFrame, rpi_path: Path) -> pd.DataFrame:
+    """Add tranc_period, lagged RPI, month sin/cos; sort by time."""
+    agg = agg.copy()
+    agg["log_volume"] = np.log1p(agg["volume"])
+    agg["log_mean_area"] = np.log1p(agg["mean_floor_area"])
+    agg["log_std_price"] = agg["log_std_price"].fillna(0.0)
+    agg["tranc_period"] = agg["Tranc_Year"] * 12 + agg["Tranc_Month"]
+
+    rpi_df = pd.read_csv(rpi_path)[["year", "quarter", "rpi"]]
+    rpi_map = rpi_df.set_index(["year", "quarter"])["rpi"].to_dict()
+    last_rpi = float(rpi_df["rpi"].iloc[-1])
+
+    def _lagged(year: int, month: int) -> float:
+        q = (month - 1) // 3 + 1
+        ly, lq = (year, q - 1) if q > 1 else (year - 1, 4)
+        return rpi_map.get((ly, lq), float("nan"))
+
+    agg["hdb_rpi"] = [_lagged(y, m) for y, m in zip(agg["Tranc_Year"], agg["Tranc_Month"])]
+    agg["hdb_rpi"] = agg["hdb_rpi"].fillna(last_rpi)
+    agg["month_sin"] = np.sin(2 * np.pi * agg["Tranc_Month"] / 12)
+    agg["month_cos"] = np.cos(2 * np.pi * agg["Tranc_Month"] / 12)
+    return agg.sort_values("tranc_period").reset_index(drop=True)
+
+
+def _feat_row_for_period(
+    periods: np.ndarray,
+    features: np.ndarray,
+    volumes: np.ndarray,
+    tp: int,
+) -> tuple[np.ndarray | None, int | None]:
+    """Exact calendar month `tp` on sorted `periods`; returns (feat_row, raw_volume)."""
+    idx = int(np.searchsorted(periods, tp))
+    if idx < len(periods) and periods[idx] == tp:
+        return features[idx].copy(), int(volumes[idx])
+    return None, None
 
 
 # ── Data split ───────────────────────────────────────────────────────────────────
@@ -110,19 +169,20 @@ def split_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
 
 # ── Sequence builder ──────────────────────────────────────────────────────────────
 
-def build_monthly_agg(df_all: pd.DataFrame, rpi_path: Path) -> pd.DataFrame:
+def build_monthly_agg(df_all: pd.DataFrame, rpi_path: Path) -> dict[str, pd.DataFrame]:
     """
-    Compute per-(town, flat_type, year, month) market stats from all transactions.
+    Compute monthly market stats at **town** and **postal-sector** granularity.
 
-    The resulting table is used as the sequence lookup; each transaction only sees
-    months strictly before its own (enforced in build_sequences), so including
-    val/test rows here does not cause leakage.
+    Returns ``{\"town\": df, \"sector\": df}``. Sector key is ``postal // 10000`` (6-digit postals).
+
+    Each transaction only sees months strictly before its own (``build_sequences``), so
+    including val/test rows in ``df_all`` does not leak future prices into sequences.
     """
     df = df_all[["Tranc_Year", "Tranc_Month", "town", "flat_type",
                  "resale_price", "floor_area_sqm"]].copy()
     df["log_price"] = np.log1p(df["resale_price"])
 
-    agg = (
+    agg_town = (
         df.groupby(["Tranc_Year", "Tranc_Month", "town", "flat_type"])
         .agg(
             log_mean_price=("log_price", "mean"),
@@ -135,76 +195,131 @@ def build_monthly_agg(df_all: pd.DataFrame, rpi_path: Path) -> pd.DataFrame:
         )
         .reset_index()
     )
-    agg["log_volume"]    = np.log1p(agg["volume"])
-    agg["log_mean_area"] = np.log1p(agg["mean_floor_area"])
-    agg["log_std_price"] = agg["log_std_price"].fillna(0.0)
-    agg["tranc_period"]  = agg["Tranc_Year"] * 12 + agg["Tranc_Month"]
+    agg_town = _apply_rpi_and_seasonal(agg_town, rpi_path)
 
-    # RPI with 1-quarter lag (same logic as v2's add_official_rpi)
-    rpi_df  = pd.read_csv(rpi_path)[["year", "quarter", "rpi"]]
-    rpi_map = rpi_df.set_index(["year", "quarter"])["rpi"].to_dict()
-    last_rpi = float(rpi_df["rpi"].iloc[-1])
+    df_s = df_all[["Tranc_Year", "Tranc_Month", "flat_type", "postal",
+                   "resale_price", "floor_area_sqm"]].copy()
+    df_s["log_price"] = np.log1p(df_s["resale_price"])
+    p = pd.to_numeric(df_s["postal"], errors="coerce")
+    df_s["sector"] = (p // 10000).astype("Int64")
+    df_s = df_s.dropna(subset=["sector"])
+    df_s["sector"] = df_s["sector"].astype(int)
 
-    def _lagged(year: int, month: int) -> float:
-        q = (month - 1) // 3 + 1
-        ly, lq = (year, q - 1) if q > 1 else (year - 1, 4)
-        return rpi_map.get((ly, lq), float("nan"))
+    agg_sec = (
+        df_s.groupby(["Tranc_Year", "Tranc_Month", "sector", "flat_type"])
+        .agg(
+            log_mean_price=("log_price", "mean"),
+            log_std_price=(
+                "log_price",
+                lambda x: float(x.std(ddof=0)) if len(x) > 1 else 0.0,
+            ),
+            volume=("log_price", "count"),
+            mean_floor_area=("floor_area_sqm", "mean"),
+        )
+        .reset_index()
+    )
+    agg_sec = _apply_rpi_and_seasonal(agg_sec, rpi_path)
 
-    agg["hdb_rpi"] = [_lagged(y, m) for y, m in zip(agg["Tranc_Year"], agg["Tranc_Month"])]
-    agg["hdb_rpi"] = agg["hdb_rpi"].fillna(last_rpi)
-
-    agg["month_sin"] = np.sin(2 * np.pi * agg["Tranc_Month"] / 12)
-    agg["month_cos"] = np.cos(2 * np.pi * agg["Tranc_Month"] / 12)
-
-    return agg.sort_values("tranc_period").reset_index(drop=True)
+    return {"town": agg_town, "sector": agg_sec}
 
 
 def build_sequences(
     df: pd.DataFrame,
-    monthly_agg: pd.DataFrame,
+    monthly_agg: pd.DataFrame | dict[str, pd.DataFrame],
     seq_len: int = SEQ_LEN,
+    min_txn_sector: int = MIN_TXN_COUNT_FOR_SECTOR_SEQ,
 ) -> np.ndarray:
     """
     Build a [N, seq_len, N_SEQ_FEATURES] float32 array.
 
-    For each transaction, collects the last `seq_len` (town, flat_type) segment-months
-    strictly before the transaction month, right-aligned.  Earlier positions are
-    zero-padded (cold start / insufficient history).
+    Timeline is driven by **(town, flat_type)** monthly rows (same as before). For each
+    timestep, if a **sector**-(flat_type) cell exists for that calendar month with
+    ``volume >= min_txn_sector``, use sector features; otherwise keep the town row.
+    Invalid/missing postal skips sector substitution (town-only).
     """
     sequences = np.zeros((len(df), seq_len, N_SEQ_FEATURES), dtype=np.float32)
 
-    # Pre-index by (town, flat_type) → sorted periods + feature arrays
+    if isinstance(monthly_agg, dict):
+        agg_town = monthly_agg["town"]
+        agg_sec = monthly_agg.get("sector")
+    else:
+        agg_town = monthly_agg
+        agg_sec = None
+
     lookup: dict[tuple, dict] = {}
-    for (town, ft), grp in monthly_agg.groupby(["town", "flat_type"]):
+    for (town, ft), grp in agg_town.groupby(["town", "flat_type"]):
         grp_s = grp.sort_values("tranc_period")
         lookup[(town, ft)] = {
-            "periods":  grp_s["tranc_period"].values,
+            "periods": grp_s["tranc_period"].values,
             "features": grp_s[SEQ_FEATURES].values.astype(np.float32),
         }
 
-    towns      = df["town"].values
-    flat_types = df["flat_type"].values
-    periods    = (df["Tranc_Year"] * 12 + df["Tranc_Month"]).values.astype(int)
+    lookup_sec: dict[tuple, dict] = {}
+    if agg_sec is not None:
+        for (sec, ft), grp in agg_sec.groupby(["sector", "flat_type"]):
+            grp_s = grp.sort_values("tranc_period")
+            lookup_sec[(int(sec), ft)] = {
+                "periods": grp_s["tranc_period"].values,
+                "features": grp_s[SEQ_FEATURES].values.astype(np.float32),
+                "volume": grp_s["volume"].values.astype(np.int32),
+            }
+
+    towns       = df["town"].values
+    flat_types  = df["flat_type"].values
+    periods     = (df["Tranc_Year"] * 12 + df["Tranc_Month"]).values.astype(int)
+    postal_num = pd.to_numeric(df["postal"], errors="coerce").to_numpy(dtype=float)
+    sector_row = np.full(len(df), -1, dtype=np.int64)
+    _vm = np.isfinite(postal_num)
+    sector_row[_vm] = np.floor_divide(postal_num[_vm], 10000.0).astype(np.int64)
 
     cold_start = 0
+    used_sector_slots = 0
+    total_slots = 0
+
     for i in range(len(df)):
-        key    = (towns[i], flat_types[i])
+        key = (towns[i], flat_types[i])
         curr_p = periods[i]
         if key not in lookup:
             cold_start += 1
             continue
         all_p = lookup[key]["periods"]
         all_f = lookup[key]["features"]
-        mask  = all_p < curr_p
+        mask = all_p < curr_p
         if not mask.any():
             cold_start += 1
             continue
-        past = all_f[mask]
-        n    = min(len(past), seq_len)
-        sequences[i, seq_len - n:] = past[-n:]  # right-aligned; most recent at seq_len-1
+
+        past_p = all_p[mask]
+        past_f = all_f[mask]
+        n = min(len(past_f), seq_len)
+        tail_p = past_p[-n:]
+        tail_f = past_f[-n:]
+
+        si = int(sector_row[i])
+        sec_key = (si, flat_types[i]) if si >= 0 else None
+
+        for j in range(n):
+            tp = int(tail_p[j])
+            feat = tail_f[j].copy()
+            total_slots += 1
+            if agg_sec is not None and sec_key is not None and sec_key in lookup_sec:
+                ent = lookup_sec[sec_key]
+                row_sec, vol = _feat_row_for_period(
+                    ent["periods"], ent["features"], ent["volume"], tp,
+                )
+                if row_sec is not None and vol is not None and vol >= min_txn_sector:
+                    feat = row_sec.astype(np.float32)
+                    used_sector_slots += 1
+            sequences[i, seq_len - n + j] = feat
 
     if cold_start:
         logger.warning("Cold-start (zero-padded) rows: %d / %d", cold_start, len(df))
+    if agg_sec is not None and total_slots > 0:
+        logger.info(
+            "Hybrid sequences: sector replaced %.2f%% of timestep slots (min_txn=%d)",
+            100.0 * used_sector_slots / total_slots,
+            min_txn_sector,
+        )
     return sequences
 
 
@@ -308,6 +423,7 @@ def prepare_split(
     df = engineer_features(raw_df, mall_dist_median)
     df = add_official_rpi(df, RPI_PATH)
     df = add_macro_interaction_features(df)
+    df = add_postal_sector(df)
     for feat, vals in spatial_feats.items():
         df[feat] = vals
 
