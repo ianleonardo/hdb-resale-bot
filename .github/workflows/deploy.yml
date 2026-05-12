@@ -29,6 +29,7 @@ jobs:
             --image gcr.io/$PROJECT_ID/hdb-backend:${{ github.sha }} \
             --region $REGION \
             --service-account hdb-backend@$PROJECT_ID.iam.gserviceaccount.com \
+            --min-instances 0 \
             --set-env-vars GCS_BUCKET=hdb-resale-artifacts,MODEL_VERSION=catboost-arima-v4,MODEL_BLOB=models/model_v4.cbm,METRICS_BLOB=models/metrics_v4.json,SPATIAL_BLOB=models/spatial_inference.pkl,ARIMA_BLOB=models/arima_bundle_v4.pkl,LOG_LEVEL=INFO \
             --quiet
 
@@ -52,6 +53,7 @@ jobs:
             --image gcr.io/$PROJECT_ID/hdb-bot:${{ github.sha }} \
             --region $REGION \
             --service-account hdb-bot@$PROJECT_ID.iam.gserviceaccount.com \
+            --min-instances 0 \
             --set-secrets TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GEMINI_API_KEY=gemini-api-key:latest,WEBHOOK_SECRET=webhook-secret:latest \
             --set-env-vars BACKEND_URL=${{ secrets.BACKEND_URL }},WEBHOOK_URL=${{ secrets.WEBHOOK_URL }},LOG_LEVEL=INFO \
             --quiet
